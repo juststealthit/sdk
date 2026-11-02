@@ -1,0 +1,72 @@
+{
+  "name": "@juststealthit/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Just Stealth It: launch, trade and read coins on Solana, Robinhood Chain, BNB Chain, HyperEVM, Base and Arc.",
+  "license": "MIT",
+  "author": "Stealth",
+  "type": "module",
+  "homepage": "https://juststealthit.xyz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juststealthit/sdk.git"
+  },
+  "keywords": [
+    "stealth",
+    "launchpad",
+    "solana",
+    "evm",
+    "uniswap-v4",
+    "pancakeswap-infinity",
+    "pump.fun",
+    "raydium",
+    "meteora"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./evm": {
+      "types": "./dist/evm/index.d.ts",
+      "import": "./dist/evm/index.js"
+    },
+    "./solana": {
+      "types": "./dist/solana/index.d.ts",
+      "import": "./dist/solana/index.js"
+    },
+    "./multichain": {
+      "types": "./dist/multichain/index.d.ts",
+      "import": "./dist/multichain/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run test/unit",
+    "test:fork": "vitest run test/fork",
+    "gen:abi": "node scripts/gen-abi.mjs",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "test:live": "vitest run test/live"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.0",
+    "@solana/web3.js": "^1.98.0",
+    "viem": "^2.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

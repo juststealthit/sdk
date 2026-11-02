@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "paths": {
+      "@juststealthit/sdk": ["./src/index.ts"],
+      "@juststealthit/sdk/evm": ["./src/evm/index.ts"],
+      "@juststealthit/sdk/solana": ["./src/solana/index.ts"],
+      "@juststealthit/sdk/multichain": ["./src/multichain/index.ts"]
+    }
+  },
+  "include": ["src", "test", "examples"]
+}
