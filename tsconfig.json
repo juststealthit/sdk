@@ -18,7 +18,12 @@
       "@juststealthit/sdk": ["./src/index.ts"],
       "@juststealthit/sdk/evm": ["./src/evm/index.ts"],
       "@juststealthit/sdk/solana": ["./src/solana/index.ts"],
-      "@juststealthit/sdk/multichain": ["./src/multichain/index.ts"]
+      "@juststealthit/sdk/multichain": ["./src/multichain/index.ts"],
+      "@juststealthit/sdk/api": ["./src/api/index.ts"],
+      "@juststealthit/sdk/live": ["./src/live/index.ts"],
+      "@juststealthit/sdk/math": ["./src/math/index.ts"],
+      "@juststealthit/sdk/utils": ["./src/utils/index.ts"],
+      "@juststealthit/sdk/perps": ["./src/perps/index.ts"]
     }
   },
   "include": ["src", "test", "examples"]

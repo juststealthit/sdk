@@ -1,219 +1,251 @@
 # @juststealthit/sdk
 
-Launch, trade and read coins on [Just Stealth It](https://juststealthit.xyz) from your own code: Solana (Pump.fun, Raydium, Meteora), Robinhood Chain, BNB Chain, HyperEVM, Base and Arc.
+The TypeScript SDK for [Just Stealth It](https://juststealthit.xyz) ($STEALTH), the multi-chain memecoin launchpad and trading terminal.
+
+- **Read everything**: coins on every chain, candles, trades, holders, risk, fee books, the Feed, staking, wallets, burns, leaderboards, all typed.
+- **Go live**: a self-healing WebSocket for trades, launches, token updates, candles and the chain head.
+- **Launch, trade and stake** on Solana (Pump.fun, Raydium LaunchLab, Meteora, and any token through Jupiter). The API builds each transaction, and your wallet checks and signs it.
+- **Go direct on chain** on Robinhood Chain, BNB Chain, HyperEVM, Base and Arc, with no API in between.
+- **Do the maths offline**: tax tiers, the anti-sniper line, bonding-curve quotes, staking estimates, tiny-price formatting.
+- **Read perps markets**: read-only Hyperliquid, Aster and Jupiter Perps data, grouped by coin.
 
 ```bash
 npm install @juststealthit/sdk
 ```
 
-Node 20 or newer. ESM only, with types. Import the part you use, so EVM code never loads Solana's library:
-
-| Import | What it does | How it reaches the chain |
-| --- | --- | --- |
-| `@juststealthit/sdk/evm` | Launch, buy, sell, claim, read on five chains | **Direct on chain.** Your RPC, your wallet, no API |
-| `@juststealthit/sdk/solana` | Launch, buy, sell, read, plus Solana's public setup | **Through the API.** It builds the transaction, you check, sign and send it |
-| `@juststealthit/sdk/multichain` | One payment, a separate coin on each chain | **Through the API**, with a session, from a server |
+Node 20 or newer, or any modern browser. ESM only, with full types. Three runtime dependencies: `viem`, `@solana/web3.js` and `@noble/curves`.
 
 > [!WARNING]
-> **The EVM contracts are not audited.** Trades and launches cost real money and can't be undone. Start small, on a throwaway wallet. Nothing in this SDK is financial advice.
+> **The EVM contracts are not audited.** Trades and launches cost real money and can't be undone. Start small, on a throwaway wallet. Nothing in this SDK is financial advice, and no estimate it gives is a promise of any return.
 
-## EVM
+## Quick start
 
 ```ts
-import { createWalletClient, http, parseEther } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { createStealthEvm, EVM_CHAINS } from "@juststealthit/sdk/evm";
+import { createStealthClient } from "@juststealthit/sdk";
+import { formatPrice, formatUsd } from "@juststealthit/sdk/utils";
 
-const account = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
-const walletClient = createWalletClient({ account, chain: EVM_CHAINS.base, transport: http(process.env.RPC_URL) });
-const stealth = createStealthEvm({ chain: "base", walletClient, rpcUrl: process.env.RPC_URL });
+const stealth = createStealthClient(); // no key, no wallet
 
-// a launch: token, pool and first buy in one transaction
-const { token } = await stealth.launch({
-  name: "My Coin",
-  symbol: "MINE",
-  logo: "https://example.com/logo.png",
-  taxBps: 125,
-  firstBuy: parseEther("0.001"),
-});
+// the launchpad's board, every chain at once
+const { items } = await stealth.market.list({ stages: ["new", "graduating"], sort: "volume" });
+for (const coin of items.slice(0, 5)) console.log(coin.symbol, formatPrice(coin.priceUsd), formatUsd(coin.marketCapUsd));
 
-// trades
-const quote = await stealth.quoteBuy(token, parseEther("0.01"));
-const bought = await stealth.buy({ token, amountIn: parseEther("0.01"), slippageBps: 300 });
-await stealth.sell({ token, amountIn: bought.amountOut / 2n });
+// one Solana coin
+const mint = items.find((c) => c.sol)!.address;
+const [risk, holders] = await Promise.all([stealth.sol.tokens.risk(mint), stealth.sol.tokens.holders(mint)]);
 
-// fees
-await stealth.claimable(token, account.address);
-await stealth.claim(token);
+// every trade, page by page, as an async iterator
+for await (const trade of stealth.sol.tokens.iterateTrades(mint)) {
+  if (trade.timestamp < Date.now() - 3_600_000) break;
+  console.log(trade.side, trade.valueUsd);
+}
+
+// live trades
+stealth.live().trades(mint, ({ trade }) => console.log("live:", trade.side, trade.valueUsd));
 ```
 
-The chain keys are `robinhood`, `bnb`, `hyperevm`, `base` and `arc`. The class picks the right contracts, ABIs and pool key for each:
+More in [`examples/`](examples): 20 runnable scripts.
 
-| Chain | Id | Gas | DEX | Worth knowing |
-| --- | --- | --- | --- | --- |
-| Robinhood Chain | 4663 | ETH | Uniswap v4 | |
-| BNB Chain | 56 | BNB | PancakeSwap Infinity | Different pool key, and settlement on a separate Vault |
-| HyperEVM | 999 | HYPE | Uniswap v4 | Its own contract addresses |
-| Base | 8453 | ETH | Uniswap v4 | |
-| Arc | 5042 | USDC | Uniswap v4 | Native USDC has 18 decimals, so amounts are 18-decimal units |
+## Modules
 
-`EVM_DEPLOYMENTS` holds every contract address, and ABIs for both builds are exported as `v4Abis`, `infinityAbis` and `abisFor(dex)`.
+Import the part you use. `/api`, `/math`, `/utils` and `/perps` never load Solana's library.
 
-### Launch options
-
-| Option | Default | Rule |
+| Import | What it does | Docs |
 | --- | --- | --- |
-| `taxBps` | `125` | 125, 225, 325, 425 or 575. Locked at launch |
-| `launchType` | `creator` | `creator`, `team`, `marketing`, `holders`, `buyback`. Locked |
-| `team` | | `team` only: 2 to 10 wallets, shares sum to 10,000. They can't change later |
-| `quote` | native | An ERC-20 the factory lists. Needs an approval, which the SDK sends |
-| `target` | the factory's | Graduation target in raw quote units |
-| `firstBuy` | `0` | Pays the tier, not the sniper fee. Stops at 5% of supply; the rest comes back |
-| `maxWalletBps`, `maxBuyBps` | off | 50-500 and 10-500, for `limitsWindow` seconds, up to an hour |
-| `firstBuyLock` | off | Seconds, up to 90 days |
-| `creator` | the sender | Who a Creator coin pays |
+| `@juststealthit/sdk` | `createStealthClient` and the errors, plus every module as a namespace | |
+| `@juststealthit/sdk/api` | Every public read, typed, with retries, cache, pagination | [docs/api.md](docs/api.md) |
+| `@juststealthit/sdk/live` | The live stream, and a polling helper for EVM | [docs/live.md](docs/live.md) |
+| `@juststealthit/sdk/solana` | Launch, trade and stake on Solana; Jupiter swaps for any token | [docs/solana.md](docs/solana.md) |
+| `@juststealthit/sdk/evm` | Launch, trade, claim and read, direct on five EVM chains | [docs/evm.md](docs/evm.md) |
+| `@juststealthit/sdk/multichain` | One payment, a separate coin on each chain, from a server | [docs/multichain.md](docs/multichain.md) |
+| `@juststealthit/sdk/perps` | Read-only perps market data from Hyperliquid, Aster and Jupiter | [docs/perps.md](docs/perps.md) |
+| `@juststealthit/sdk/math` | Fees, the anti-sniper line, curves and staking rewards | [docs/math.md](docs/math.md) |
+| `@juststealthit/sdk/utils` | Formatting, address checks and the chain registry | [docs/utils.md](docs/utils.md) |
 
-`prepareLaunch()` shows you the predicted address, the value and the expected tokens before anything is sent. A prepared launch names the factory's `configVersion`, and reverts with `StaleConfig` if a setting changed since.
+Errors, retries, timeouts and caching are covered in [docs/errors-and-http.md](docs/errors-and-http.md).
 
-### What the launch types do on EVM
+## The read client
 
-- **Creator and Team** wallets claim with `claim()`. No bot is involved.
-- **Marketing, Holders and Buyback** coins pay through Just Stealth It's bots and a public sweep, so those payouts depend on them running.
-- **Pot is refused.** It follows a fee plan that only the site can store, and a coin launched directly would keep its fees in the vault with no way out.
-- **Wallet, Diamond Hands, Feed a Coin, Auto Liquidity, Mix and Social** need that same stored plan, so on EVM they're available through [multi-chain](#multi-chain), not direct.
+`createStealthClient(options?)` groups every public read by area. Every method takes an optional last argument with `{ signal, timeoutMs, retry, cache, headers }`.
 
-## Solana
+| Area | Methods |
+| --- | --- |
+| `stealth.platform` | `appConfig`, `tokenConfig`, `officialToken`, `status`, `statusSummary`, `chartEvents`, `ipfsUrl` |
+| `stealth.market` | The launchpad's coins across chains: `list`, `iterate`, `counts`, `search`, `stats` |
+| `stealth.sol` | `config`, `status`, `stats`, `solPrice`, `locks`, `leaderboard`, `leaderboardStatus`, `quote`, `txStatus`, `bundleStatus`, `balance` |
+| `stealth.sol.tokens` | `list`, `iterate`, `counts`, `search`, `get`, `find`, `candles`, `trades`, `iterateTrades`, `holders`, `topTraders`, `risk`, `creator`, `price`, `feePlan`, `buybacks`, `rewards`, `payout`, `marketing`, `marketingStats`, `metadata` |
+| `stealth.sol.market` | Any Solana token, through Jupiter: `coin`, `candles`, `trending`, `launchers`, `launcher`, `quote`, `buildSwap` |
+| `stealth.sol.wallets` | `pnl`, `trades`, `iterateTrades`, `rewards`, `analytics`, `activity`, `analysis`, `portfolio` |
+| `stealth.sol.burn` | The $STEALTH buy back and burn: `overview`, `events`, `iterateEvents`, `coins`, `coin`, `next` |
+| `stealth.sol.marketing` | The marketing ladder: `tiers`, `overview`, `summary`, `leaderboard` |
+| `stealth.evm` | `config`, `wallet`, `positions`, and `chain(key)` for one chain's reads |
+| `stealth.evm.chain("base")` | `nativePrice`, `listTokens`, `iterateTokens`, `countTokens`, `searchTokens`, `getToken`, `findToken`, `getCandles`, `getTrades`, `iterateTrades`, `getHolders`, `getTopTraders`, `getRisk`, `quote`, `getRewards`, `getPot`, `getBuybacks`, `getPayoutBot`, `getMarketing`, `getMarketingStats`, `marketing*` |
+| `stealth.feed` | `list`, `iterate`, `fees`, `feesOverview`, `profile`, `profileCoins`, `followers`, `following` |
+| `stealth.staking` | `overview`, `pool`, `position`, `estimate`, and the raw `prepareStake`, `prepareUnstake`, `submit` |
+| `stealth.multichain` | Launch groups: `list`, `get`, `ofCoin` |
+| `stealth.social` | `people`, `lookup`, `profile`, `checkHandle` |
+| `stealth.live()` | The live stream, shared by the client |
+
+Names that end in `Eth` (`priceEth`, `ethAmount`, `raisedEth`) hold the chain's **native coin**: SOL on Solana. The SDK keeps the API's names, so a row reads the same in the SDK as on the wire.
+
+## Live stream
+
+```ts
+const live = stealth.live(); // or createStealthStream() from /live
+
+const off = live.trades(mint, ({ trade, token }) => console.log(trade.side, token.marketCapUsd));
+live.launches(({ token }) => console.log("new coin", token.symbol));
+live.candles(mint, "1m", ({ candle }) => chart.update(candle));
+live.heads(({ block, lag }) => console.log("slot", block, "indexer lag", lag));
+live.onReconnect(() => refetch()); // messages sent while it was down are gone
+
+for await (const msg of live.iterate("tokens")) console.log(msg.type); // or as an async iterator
+
+off();
+live.close();
+```
+
+One WebSocket, subscriptions counted per channel, exponential backoff with jitter, every channel re-subscribed after a reconnect, an application ping and an idle watchdog. It uses the global `WebSocket` (browsers, Node 22+); on Node 20 pass the `ws` package's: `createStealthClient({ stream: { WebSocket } })`.
+
+EVM chains have no stream. `pollTrades(readPage, token, handler)` polls and calls `handler` once per new trade.
+
+## Solana: launch, trade, stake
 
 ```ts
 import { Keypair } from "@solana/web3.js";
 import { createStealthSolana, keypairSigner } from "@juststealthit/sdk/solana";
 
-const keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_KEY!)));
-const sol = createStealthSolana({ signer: keypairSigner(keypair) });
+const sol = createStealthSolana({ signer: keypairSigner(keypair) }); // or a wallet adapter, as it is
 
-const { mint, signatures } = await sol.launch({
-  venue: "pump",
-  name: "My Coin",
-  symbol: "MINE",
-  feeMode: "buyback",
-  firstBuyLamports: 10_000_000n,
-});
+const { mint } = await sol.launch({ venue: "pump", name: "My Coin", symbol: "MINE", feeMode: "buyback", firstBuyLamports: 10_000_000n });
 
-await sol.buy({ mint, amount: 10_000_000n, slippageBps: 300 });
+await sol.buy({ mint, amount: 10_000_000n, slippageBps: 300 });   // a launchpad coin, on its own venue
+await sol.marketBuy({ mint: anyMint, amount: 5_000_000n });        // any Solana token, through Jupiter
+await sol.swap({ mint: anyMint, side: "buy", amount: 1_000_000n }); // picks the route for you
+
+await sol.stake(100n * 10n ** 6n); // $STEALTH staking: prepare, check, sign, submit
 ```
 
-`signer` takes a wallet adapter as it is, or `keypairSigner` for a key in your process.
-
-**Why this goes through the API.** A coin's fees land in an escrow derived from a key the server holds, and that's what runs its launch type. So the server has to build the launch. It simulates it, signs for the mint, and returns a transaction. The SDK checks that your wallet is the fee payer, adds your signature, and sends it through the API or, with `connection`, through your own RPC. Your key never leaves your process, and fees are claimed for you by the server's bot.
+**Your key never leaves your process.** The API builds each transaction (a launch has to be built there: the coin's escrow comes from a key the server holds, and the mint is the server's to sign). The SDK checks that your wallet pays for it, and refuses one paid by anyone else. Then it adds your signature and sends it, through the API or your own `connection`. A staking transaction comes co-signed by the staking wallet and is signed exactly as it came.
 
 | Venue | `venue` | Tiers |
 | --- | --- | --- |
 | Pump.fun | `pump` | None: Pump sets the fee. 70% of the creator part goes to the coin, 30% to the platform, locked on chain |
-| Raydium LaunchLab | `raydium` | `RAYDIUM_TIERS`. The coin gets 0.5% on each tier: Raydium caps it there, so it isn't 70/30 |
+| Raydium LaunchLab | `raydium` | `RAYDIUM_TIERS`. The coin gets 0.5% on each tier, because Raydium caps it there, so it isn't 70/30 |
 | Meteora | `meteora` | `METEORA_TIERS`. Meteora keeps 20%, and the rest splits 70/30 |
 
-`feeMode` picks where creator fees go, locked at launch:
+`feeMode` picks where creator fees go, locked at launch: `creator`, `social`, `team`, `wallet`, `marketing`, `holders`, `diamond`, `buyback`, `feed`, `liquidity` or `mix`. See [docs/solana.md](docs/solana.md) for what each needs. What's switched on can change: `stealth.sol.config()` says what the server offers right now.
 
-| `feeMode` | Creator fees go to | Needs |
-| --- | --- | --- |
-| `creator` | The launcher, or `recipient` | |
-| `social` | A social account's vault, claimed later | `recipient: { kind: "social", ... }` |
-| `team` | 2 to 10 wallets | `team` |
-| `wallet` | An address, on Solana or another chain Relay lists | `payout` |
-| `marketing` | The coin's marketing | |
-| `holders` | Holders, on a schedule | |
-| `diamond` | Holders who never sold | |
-| `buyback` | Buys the coin and burns it | |
-| `feed` | Buys another coin and burns it | `feed` |
-| `liquidity` | A pot that joins the pool after graduation | |
-| `mix` | 2 to 5 of these, shares you set | `mix` |
+## EVM: direct on chain
 
-What's switched on can change. `await sol.getConfig()` says what the server offers right now, and `getPairs(venue)` lists what a coin can pair with. Social launches are off in production as of this release.
+```ts
+import { createWalletClient, http, parseEther } from "viem";
+import { createStealthEvm, EVM_CHAINS } from "@juststealthit/sdk/evm";
 
-The public setup is exported too: `LAUNCHLAB_PLATFORMS`, `LAUNCH_LOOKUP_TABLE`, `CPMM_CONFIGS`, and `METEORA_SHARED_CONFIGS`, the 20 shared configs by quote mint.
+const walletClient = createWalletClient({ account, chain: EVM_CHAINS.base, transport: http(rpcUrl) });
+const stealth = createStealthEvm({ chain: "base", walletClient, rpcUrl });
+
+const { token } = await stealth.launch({ name: "My Coin", symbol: "MINE", taxBps: 125, firstBuy: parseEther("0.001") });
+const bought = await stealth.buy({ token, amountIn: parseEther("0.01"), slippageBps: 300 });
+await stealth.sell({ token, amountIn: bought.amountOut / 2n });
+await stealth.claim(token);
+```
+
+| Chain | Key | Id | Gas | DEX |
+| --- | --- | --- | --- | --- |
+| Robinhood Chain | `robinhood` | 4663 | ETH | Uniswap v4 |
+| BNB Chain | `bnb` | 56 | BNB | PancakeSwap Infinity |
+| HyperEVM | `hyperevm` | 999 | HYPE | Uniswap v4 |
+| Base | `base` | 8453 | ETH | Uniswap v4 |
+| Arc | `arc` | 5042 | USDC (18 decimals) | Uniswap v4 |
+
+Avalanche, Arbitrum and X Layer are announced but have nothing deployed. The chain registry in `/utils` marks them `coming_soon`, and the SDK refuses them.
 
 ## Multi-chain
 
-One payment from a home chain makes **a separate coin on each chain**. They're not bridged versions of one token.
+One payment from a home chain makes **a separate coin on each chain**. They're not bridged versions of one token. It runs server-side, because it needs the API's session cookie. See [docs/multichain.md](docs/multichain.md).
+
+## Perps (read-only)
 
 ```ts
-import { createStealthMultichain, solanaMcWallet } from "@juststealthit/sdk/multichain";
+import { createPerpsClient } from "@juststealthit/sdk/perps";
 
-const mc = createStealthMultichain();
-await mc.signIn(solanaMcWallet(sol));
-
-const simulation = await mc.simulate({ home: "solana", chains: ["solana", "base", "bnb"], venue: "pump", name: "Everywhere", symbol: "EVRY" });
-console.log(simulation.total, simulation.usd);
-
-const { orderId, payment } = await mc.place(simulation.quoteId);
-await mc.paySolana(sol, payment, simulation.total); // or mc.payEvm(walletClient, payment, simulation.total)
-
-const order = await mc.waitForOrder(orderId, { onUpdate: console.log });
+const perps = createPerpsClient();
+const groups = await perps.groups(); // Hyperliquid, Aster and Jupiter Perps, grouped by coin
+const candles = await perps.candles(groups[0]!.markets[0]!, "15m");
+perps.watchMids((mids) => console.log(mids.BTC));
 ```
 
-`simulate` prices the launch from real Relay quotes on the server, and holds for two minutes. Before paying, the SDK checks that the payment is exactly the simulated transfer to the deposit address, and refuses anything else. A chain that fails is retried, then refunded; a coin that landed stays.
+Market data only, from each venue's public API. There is no order placement, no account access and nothing to sign.
 
-The home chain is the one that pays: a Solana wallet pays from Solana, an EVM wallet from its EVM chain. Sign-in takes EOAs only, so smart-contract wallets can't use this.
+## Maths and helpers
+
+```ts
+import { sniperFeeBps, splitEvmFee, quoteCurveBuy, estimateStakingReward } from "@juststealthit/sdk/math";
+import { formatPrice, isSolanaAddress, CHAINS } from "@juststealthit/sdk/utils";
+
+sniperFeeBps(125, 3);           // 7225: 72.25% three seconds after launch
+formatPrice(0.00000123);        // "$0.0₅123"
+isSolanaAddress("So111…112");   // true
+```
 
 ## Sniper fee
 
-A coin's first 15 seconds cost up to 90%, stepping down each second to the tier, on Meteora and all EVM chains. `buy` and `sell` refuse a trade charged above `maxFeeBps` with a `StealthFeeTooHighError`. The default is 1,000 (10%), and raising it is your call.
+A coin's first 15 seconds on Meteora and every EVM chain cost up to 90%, falling each second to the tier. `buy` and `sell` refuse a trade charged above `maxFeeBps` with a `StealthFeeTooHighError`. The default is 1,000 (10%), and raising it is your call. `sniperSchedule(tierBps)` shows the whole line.
 
 ## Errors
 
-| Error | Meaning |
-| --- | --- |
-| `StealthInputError` | The SDK refused your input before sending |
-| `StealthFeeTooHighError` | Over `maxFeeBps`: `feeBps` has the rate |
-| `StealthTransactionMismatchError` | A transaction from the API wasn't what you asked for, so it wasn't signed |
-| `StealthApiError` | The API said no: `status`, `code`, `issues`, `retryAfterSec` |
-| `StealthBrowserWriteError` | See below |
+Everything the SDK throws on purpose is a `StealthError` with a stable `code`.
 
-EVM reverts come through viem with the contract's error name, such as `StaleConfig` or `MaxBuyExceeded`.
+| Error | `code` | Meaning |
+| --- | --- | --- |
+| `StealthInputError` | `invalid_input` | The SDK refused your input before sending |
+| `StealthFeeTooHighError` | `fee_too_high` | Over `maxFeeBps`: `feeBps` has the rate |
+| `StealthTransactionMismatchError` | `transaction_mismatch` | A transaction from the API wasn't what you asked for, so it wasn't signed |
+| `StealthTransactionError` | `transaction_failed`, `confirmation_timeout`, `bundle_*` | Failed on chain, or not confirmed in time. `signature` is set |
+| `StealthApiError` | the API's own, such as `not_found`, `invalid_request`, `rate_limited` | `status`, `issues`, `retryAfterSec`, `requestId` |
+| `StealthNetworkError` | `network_error` | No answer at all |
+| `StealthTimeoutError` | `timeout` | Over `timeoutMs` |
+| `StealthAbortError` | `aborted` | Your `AbortSignal` fired |
+| `StealthParseError` | `invalid_response` | The answer wasn't JSON |
+| `StealthBrowserWriteError` | `browser_write_blocked` | See [Browsers](#browsers) |
+| `StealthWebSocketError` | `websocket_error` | The stream closed or couldn't connect |
 
-## Limits and access
+`isStealthError(e, "not_found")` narrows by code. EVM reverts come through viem with the contract's error name, such as `StaleConfig` or `MaxBuyExceeded`.
 
-No API key. Limits are per IP, and a 429 carries `retryAfterSec`.
+## Reliability
 
-| Path | Limit |
-| --- | --- |
-| Anything under `/api` | 1,200 a minute |
-| `POST /sol/launch` | 10 per 10 minutes |
-| `POST /sol/swap`, `POST /sol/send` | 60 a minute each |
-| `POST /sol/send-bundle` | 40 a minute |
-| `GET /sol/quote`, `/sol/tx`, `/sol/balance`, `/sol/portfolio` | 180 a minute, shared |
-| `GET /sol/launch/pairs` and pair lookups | 60 a minute |
-| `GET /sol/tokens/:mint/price` | 120 a minute |
-| `POST /sol/tokens/:mint/payout` | 6 a minute, with a cooldown per coin |
-| `GET /social-fees/lookup` | 20 a minute |
-| `/multichain` writes, reads | 30 and 300 a minute |
-| Multi-chain launches | Per paying wallet: see `mc.getConfig()` |
+- **Retries** on 5xx, 408, 425, 429, timeouts and network errors, with exponential backoff and jitter. A 429 waits as long as the server's `Retry-After` says, and the SDK assumes no limits of its own. A POST is retried only on a 429, so nothing is ever sent twice by surprise.
+- **Timeouts** per try, and an **`AbortSignal`** per call that also cancels waits between retries.
+- **An optional cache** for GETs (`cache: true`, or your own store), and identical GETs in flight share one request.
+- **Request ids**: each request carries an `x-request-id`, which shows up on its error.
+- **Hooks**: `onRequest` and `onResponse` for logging and metrics.
+- **Pluggable `fetch`** and **base URL override** (`apiUrl`), for proxies, tests and your own backend.
 
-Solana launches and trades need no sign-in: the wallet's signature on the transaction is the authorisation. Multi-chain needs a session, which the API sets as a cookie after a signed message. The SDK carries it for you, and `mc.api.exportSession()` keeps it across restarts. Treat that value like a password for its 8 hours.
+## Browsers
 
-### Browsers
+**Reads work anywhere.** API writes don't work from a browser page on another site: the API allows cross-origin requests only for reads, so `POST /sol/launch`, `/sol/swap`, staking and `/multichain` are refused by the browser. The SDK raises `StealthBrowserWriteError` rather than a bare CORS failure. Call those from a server, or give the SDK your own backend with `apiUrl`. EVM needs none of this: it runs on your RPC, in a browser too.
 
-**Reads work anywhere. API writes don't work from a browser page on another site.** The API allows cross-origin requests only for reads, so `POST /sol/launch`, `/sol/swap` and `/multichain` are refused by the browser. The SDK raises `StealthBrowserWriteError` rather than a bare CORS failure.
-
-Call those from a server, or give the SDK your own backend with `apiUrl`, forwarding to the official API. Rate limits then count against your server's IP, so plan for that. EVM needs none of this: it runs on your RPC, in a browser too.
+No API key is needed. The API limits requests per IP. If you're limited, the error is `rate_limited` with `retryAfterSec`, and the client already waited and retried before throwing it.
 
 ## Development
 
 ```bash
-npm test             # unit tests
-npm run test:fork    # the real contracts, on local anvil forks of all five chains
-npm run test:live    # reads against production: nothing written, nothing spent
+npm install
+npm run typecheck
+npm test             # unit tests, no network
 npm run build
+npm run docs         # API reference into docs/api (typedoc)
+npm run test:live    # reads against production: nothing written, nothing spent
+npm run test:fork    # the real contracts, on local anvil forks (needs Foundry)
 ```
 
-`test:fork` needs [Foundry](https://getfoundry.sh). It forks each chain locally and every transaction stays inside that process. `FORK_CHAINS=base,bnb` picks chains and `FORK_RPC_BASE=<url>` swaps an RPC.
-
-ABIs are generated from the contracts' forge artifacts with `CONTRACTS_OUT=<out dir> npm run gen:abi`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 
-[Website](https://juststealthit.xyz) · [X](https://x.com/juststealthit) · [Telegram](https://t.me/juststealthit)
+[Website](https://juststealthit.xyz) · [Docs](https://github.com/juststealthit/docs) · [Contracts](https://github.com/juststealthit/smart-contracts) · [X](https://x.com/juststealthit) · [Telegram](https://t.me/juststealthit)
 
-Just Stealth It is not affiliated with Pump.fun, Raydium, Meteora, Robinhood, BNB Chain, Hyperliquid, Base, Circle or Solana Foundation.
+Just Stealth It is not affiliated with Pump.fun, Raydium, Meteora, Jupiter, Hyperliquid, Aster, Robinhood, BNB Chain, Base, Circle or Solana Foundation.
 
 MIT License.

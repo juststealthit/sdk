@@ -201,7 +201,7 @@ export interface LaunchEvent {
   transactionHash: Hash;
 }
 
-interface LaunchParams {
+export interface LaunchParams {
   name: string;
   symbol: string;
   logo: string;

@@ -5,6 +5,7 @@ export interface Call {
   path: string;
   body: unknown;
   cookie: string | null;
+  headers: Headers;
 }
 
 type Reply = unknown | ((call: Call) => unknown);
@@ -17,9 +18,9 @@ export function fakeApi(routes: Record<string, Reply>) {
     const url = new URL(String(input));
     const path = url.pathname.replace(/^\/api/, "");
     const method = init?.method ?? "GET";
-    const call: Call = { method, path: path + url.search, body: init?.body ? JSON.parse(String(init.body)) : undefined, cookie: new Headers(init?.headers).get("cookie") };
+    const call: Call = { method, path: path + url.search, body: init?.body ? JSON.parse(String(init.body)) : undefined, cookie: new Headers(init?.headers).get("cookie"), headers: new Headers(init?.headers) };
     calls.push(call);
-    const route = routes[`${method} ${path}`];
+    const route = routes[`${method} ${path}${url.search}`] ?? routes[`${method} ${path}`];
     if (route === undefined) return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
     const out = typeof route === "function" ? (route as (c: Call) => unknown)(call) : route;
     const r = (out && typeof out === "object" && "__reply" in out ? out : { status: 200, body: out, headers: [] }) as { status: number; body: unknown; headers: [string, string][] };

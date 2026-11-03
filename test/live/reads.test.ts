@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createStealthClient } from "../../src/index.js";
 import { createStealthEvm, EVM_DEPLOYMENTS, type EvmChainKey } from "../../src/evm/index.js";
 import { createStealthMultichain } from "../../src/multichain/index.js";
 import { createStealthSolana, LAUNCHLAB_PLATFORMS, METEORA_SHARED_CONFIGS, METEORA_TIERS, RAYDIUM_TIERS, SOLANA_PROGRAMS, LAUNCH_LOOKUP_TABLE } from "../../src/solana/index.js";
@@ -63,5 +64,38 @@ describe.each(Object.keys(EVM_DEPLOYMENTS) as EvmChainKey[])("%s, read from its 
     expect(cfg.launchesPaused).toBe(false);
     expect(cfg.configVersion).toBeGreaterThan(0n);
     expect(cfg.launchFee).toBe(0n);
+  });
+});
+
+describe("the typed read client, against production", () => {
+  const stealth = createStealthClient();
+
+  it("reads the platform and the cross-chain board", async () => {
+    const cfg = await stealth.platform.appConfig();
+    expect(typeof cfg.comingSoon).toBe("boolean");
+    const page = await stealth.market.list({ sort: "volume" });
+    expect(Array.isArray(page.items)).toBe(true);
+    const counts = await stealth.market.counts();
+    expect(typeof counts.new).toBe("number");
+  });
+
+  it("reads a Solana coin's candles, trades and holders", async () => {
+    const { items } = await stealth.sol.tokens.list({ stages: ["new", "graduating", "migrated"], sort: "volume" });
+    const coin = items[0];
+    if (!coin) return;
+    expect(Array.isArray(await stealth.sol.tokens.candles(coin.address, { interval: "5m" }))).toBe(true);
+    expect(Array.isArray((await stealth.sol.tokens.trades(coin.address)).items)).toBe(true);
+    expect(Array.isArray(await stealth.sol.tokens.holders(coin.address))).toBe(true);
+  });
+
+  it("reads staking, the feed and status", async () => {
+    expect(typeof (await stealth.staking.overview()).enabled).toBe("boolean");
+    expect(Array.isArray((await stealth.feed.list({ limit: 5 })).items)).toBe(true);
+    expect(["operational", "degraded", "down"]).toContain((await stealth.platform.statusSummary()).overall);
+  });
+
+  it("agrees with the SDK's EVM chain list", async () => {
+    const cfg = await stealth.evm.config();
+    for (const c of cfg.chains) expect(EVM_DEPLOYMENTS[c.id as EvmChainKey]?.chainId).toBe(c.chainId);
   });
 });

@@ -28,7 +28,7 @@ describe("ApiClient", () => {
 
   it("falls back to the Retry-After header", async () => {
     const { fetch } = fakeApi({ "GET /x": reply(429, { error: "cooldown" }, [["retry-after", "7"]]) });
-    await expect(new ApiClient({ fetch }).get("/x")).rejects.toMatchObject({ retryAfterSec: 7 });
+    await expect(new ApiClient({ fetch, retry: false }).get("/x")).rejects.toMatchObject({ retryAfterSec: 7 });
   });
 
   it("keeps a session cookie and sends it back, and only its name and value", async () => {

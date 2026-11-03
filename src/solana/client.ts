@@ -1,7 +1,12 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 
+import { SolApi, type SolHolder, type TokenBuybacks, type TokenFeePlan, type TokenRewards } from "../api/sol.js";
+import type { CursorPage, ApiTrade } from "../api/common.js";
+import type { MarketQuote } from "../api/sol-market.js";
+import type { Portfolio } from "../api/wallets.js";
+import { StakingApi, type StakeSubmitResult } from "../api/staking.js";
 import { ApiClient, type ApiOptions } from "../shared/api.js";
-import { StealthApiError, StealthError, StealthFeeTooHighError, StealthInputError, StealthTransactionMismatchError } from "../shared/errors.js";
+import { StealthApiError, StealthError, StealthFeeTooHighError, StealthInputError, StealthTransactionError, StealthTransactionMismatchError } from "../shared/errors.js";
 import { MIX_LIMITS, TEAM_LIMITS, type SolanaVenue } from "./constants.js";
 import { decodeTransaction, encodeTransaction, feePayerOf, type AnyTransaction, type SolanaSigner } from "./signer.js";
 import type {
@@ -78,6 +83,10 @@ export function checkSolanaLaunch(input: SolanaLaunchInput) {
  */
 export class StealthSolana {
   readonly api: ApiClient;
+  /** Every Solana read, typed: tokens, burns, marketing, the Jupiter market and wallets. Shares this client's HTTP settings. */
+  readonly data: SolApi;
+  /** $STEALTH staking reads and raw calls. {@link stake} / {@link unstake} sign and submit for you. */
+  readonly staking: StakingApi;
   private readonly signer: SolanaSigner | undefined;
   private readonly connection: Connection | undefined;
   private readonly pollMs: number;
@@ -86,6 +95,8 @@ export class StealthSolana {
 
   constructor(opts: StealthSolanaOptions = {}) {
     this.api = new ApiClient(opts);
+    this.data = new SolApi(this.api);
+    this.staking = new StakingApi(this.api);
     this.signer = opts.signer;
     this.connection = opts.connection;
     this.pollMs = opts.pollMs ?? 1_200;
@@ -103,23 +114,23 @@ export class StealthSolana {
   getConfig() {
     return this.api.get<{ venues: unknown[]; feeModes: unknown[]; [k: string]: unknown }>("/sol/config");
   }
-  /** What a coin can pair with on `venue`. Limit: 60 a minute per IP. */
+  /** What a coin can pair with on `venue`. */
   getPairs(venue: SolanaVenue = "raydium") {
     return this.api.get<PairCatalog>("/sol/launch/pairs", { venue });
   }
-  /** Any token by name, ticker or address, and whether `venue` can pair with it. Limit: 60 a minute. */
+  /** Any token by name, ticker or address, and whether `venue` can pair with it. */
   searchPairs(q: string, venue: SolanaVenue = "raydium") {
     return this.api.get<{ [k: string]: unknown }>("/sol/launch/pairs/search", { q, venue });
   }
-  /** One pair: its first-buy cap, what its curve raises and what a launch on it pays. Limit: 60 a minute. */
+  /** One pair: its first-buy cap, what its curve raises and what a launch on it pays. */
   getPair(mint: string, opts: { venue?: SolanaVenue; taxTier?: string; globalTaxBps?: number } = {}) {
     return this.api.get<{ [k: string]: unknown }>(`/sol/launch/pairs/${mint}`, opts);
   }
-  /** A wallet launch's address against its chain, the same check the launch makes. Limit: 60 a minute. */
+  /** A wallet launch's address against its chain, the same check the launch makes. */
   checkPayout(chainId: number, address: string) {
     return this.api.get<{ ok: boolean; chainId: number; vmType: string; displayName: string | null }>("/sol/launch/payout-check", { chainId, address });
   }
-  /** A social account's permanent id, for a social launch. Limit: 20 a minute. Off while the server has social fees off. */
+  /** A social account's permanent id, for a social launch. Off while the server has social fees off. */
   lookupSocial(provider: string, handle: string) {
     return this.api.get<SocialLookup>("/social-fees/lookup", { provider, handle });
   }
@@ -132,28 +143,29 @@ export class StealthSolana {
   getToken(mint: string) {
     return this.api.get<SolanaToken>(`/sol/tokens/${mint}`);
   }
-  /** Read from the pool now, when it can be. Limit: 120 a minute. */
+  /** Read from the pool now, when it can be. */
   getPrice(mint: string) {
     return this.api.get<{ priceSol: number; priceUsd: number; marketCapUsd: number; solUsd: number; at: number; live: boolean }>(`/sol/tokens/${mint}/price`);
   }
+  /** One page of a coin's trades, newest first. For every page, use `data.tokens.iterateTrades(mint)`. */
   getTrades(mint: string, cursor?: string) {
-    return this.api.get<unknown>(`/sol/tokens/${mint}/trades`, { cursor });
+    return this.api.get<CursorPage<ApiTrade>>(`/sol/tokens/${mint}/trades`, { cursor });
   }
   getHolders(mint: string) {
-    return this.api.get<unknown>(`/sol/tokens/${mint}/holders`);
+    return this.api.get<SolHolder[]>(`/sol/tokens/${mint}/holders`);
   }
   /** A coin's locked launch type and slices. */
   getFeePlan(mint: string) {
-    return this.api.get<unknown>(`/sol/tokens/${mint}/fee-plan`);
+    return this.api.get<TokenFeePlan>(`/sol/tokens/${mint}/fee-plan`);
   }
   getBuybacks(mint: string) {
-    return this.api.get<unknown>(`/sol/tokens/${mint}/buybacks`);
+    return this.api.get<TokenBuybacks>(`/sol/tokens/${mint}/buybacks`);
   }
   getRewards(mint: string) {
-    return this.api.get<unknown>(`/sol/tokens/${mint}/rewards`);
+    return this.api.get<TokenRewards>(`/sol/tokens/${mint}/rewards`);
   }
   getPortfolio(owner: string) {
-    return this.api.get<unknown>(`/sol/portfolio/${owner}`);
+    return this.api.get<Portfolio>(`/sol/portfolio/${owner}`);
   }
   getBalance(owner: string, mint?: string) {
     return this.api.get<{ lamports: string; tokenBaseUnits: string | null }>(`/sol/balance/${owner}`, { mint });
@@ -162,14 +174,14 @@ export class StealthSolana {
   getPayoutStatus(mint: string) {
     return this.api.get<{ enabled: boolean; nextAt: number | null; minLamports: string }>(`/sol/tokens/${mint}/payout`);
   }
-  /** Runs a coin's payout now instead of waiting for the bot. Anyone may ask. Limit: 6 a minute, with a cooldown per coin. */
+  /** Runs a coin's payout now instead of waiting for the bot. Anyone may ask. */
   requestPayout(mint: string) {
     return this.api.post<{ txs: string[]; retryAt: number | null; paid: boolean }>(`/sol/tokens/${mint}/payout`);
   }
 
   // ---- launch --------------------------------------------------------------------------------------------------------
 
-  /** Asks the API to build a launch. Nothing lands until it's signed and sent. Limit: 10 per 10 minutes, per IP. */
+  /** Asks the API to build a launch. Nothing lands until it's signed and sent. */
   async prepareLaunch(input: SolanaLaunchInput): Promise<PreparedSolanaLaunch> {
     checkSolanaLaunch(input);
     const launcher = this.requireSigner().publicKey.toBase58();
@@ -200,7 +212,7 @@ export class StealthSolana {
     return this.api.get<SolanaQuote>("/sol/quote", { mint, side, amount: amount.toString(), slippageBps });
   }
 
-  /** The API's unsigned swap. Limit: 60 a minute. */
+  /** The API's unsigned swap. */
   buildSwap(o: SolanaTradeOptions & { side: "buy" | "sell" }) {
     return this.api.post<BuiltSwap>("/sol/swap", { mint: o.mint, owner: this.requireSigner().publicKey.toBase58(), side: o.side, amount: o.amount.toString(), slippageBps: o.slippageBps ?? 300 });
   }
@@ -219,6 +231,70 @@ export class StealthSolana {
     if (built.quote.feeBps > max) throw new StealthFeeTooHighError(built.quote.feeBps, max);
     const [signature] = await this.submit([{ transaction: built.transaction, version: "v0" }]);
     return { signature: signature!, quote: built.quote };
+  }
+
+  // ---- any token, through Jupiter -----------------------------------------------------------------------------------
+
+  /** A Jupiter-routed quote for any Solana token. Buy: lamports in. Sell: the token's base units in. */
+  marketQuote(mint: string, side: "buy" | "sell", amount: bigint, slippageBps = 300) {
+    return this.data.market.quote(mint, side, amount, slippageBps);
+  }
+
+  /** Buys any Solana token with SOL through Jupiter: built by the API, checked, signed here, sent and confirmed. */
+  marketBuy(o: MarketTradeOptions) {
+    return this.marketTrade({ ...o, side: "buy" });
+  }
+
+  /** Sells any Solana token for SOL through Jupiter. */
+  marketSell(o: MarketTradeOptions) {
+    return this.marketTrade({ ...o, side: "sell" });
+  }
+
+  private async marketTrade(o: MarketTradeOptions & { side: "buy" | "sell" }): Promise<MarketSwapResult> {
+    const owner = this.requireSigner().publicKey.toBase58();
+    const built = await this.data.market.buildSwap({ mint: o.mint, owner, side: o.side, amount: o.amount, slippageBps: o.slippageBps });
+    const max = o.maxPriceImpactPct;
+    if (max !== undefined && built.quote.priceImpactPct !== null && built.quote.priceImpactPct > max) {
+      throw new StealthInputError(`This trade moves the price ${built.quote.priceImpactPct.toFixed(2)}%, above the ${max}% limit.`);
+    }
+    if (BigInt(built.quote.minAmountOut) <= 0n) throw new StealthTransactionMismatchError("The swap would accept nothing back, so it wasn't signed.");
+    const [signature] = await this.submit([{ transaction: built.transaction, version: "v0" }]);
+    return { signature: signature!, quote: built.quote };
+  }
+
+  /**
+   * Buys or sells by whichever route trades the coin: its own venue for a launchpad coin still there (`sol.swapVia === "app"`),
+   * Jupiter for everything else. Returns the route it took.
+   */
+  async swap(o: SolanaTradeOptions & { side: "buy" | "sell"; maxPriceImpactPct?: number }): Promise<(SwapResult & { route: "app" }) | (MarketSwapResult & { route: "jupiter" })> {
+    const token = await this.data.tokens.find(o.mint);
+    if (token?.sol.swapVia === "app") return { ...(await this.trade(o)), route: "app" };
+    return { ...(await this.marketTrade(o)), route: "jupiter" };
+  }
+
+  // ---- staking -------------------------------------------------------------------------------------------------------
+
+  /** Stakes `amount` base units of the pool's coin: prepares, checks the payer, signs and submits. Default pool `stealth`. */
+  async stake(amount: bigint, pool = "stealth"): Promise<StakeSubmitResult & { actionId: number }> {
+    const owner = this.requireSigner().publicKey.toBase58();
+    const prepared = await this.staking.prepareStake(pool, owner, amount);
+    return { ...(await this.signAndSubmitStaking(prepared.actionId, prepared.transaction)), actionId: prepared.actionId };
+  }
+
+  /** Unstakes `amount` base units of receipts. The coins and reward are released after the pool's cooldown. */
+  async unstake(amount: bigint, pool = "stealth"): Promise<StakeSubmitResult & { actionId: number; unlockInSec: number }> {
+    const owner = this.requireSigner().publicKey.toBase58();
+    const prepared = await this.staking.prepareUnstake(pool, owner, amount);
+    return { ...(await this.signAndSubmitStaking(prepared.actionId, prepared.transaction)), actionId: prepared.actionId, unlockInSec: prepared.unlockInSec };
+  }
+
+  /** The staking wallet has co-signed the exact bytes, so the transaction is signed as it came, never rebuilt. */
+  private async signAndSubmitStaking(actionId: number, transaction: string): Promise<StakeSubmitResult> {
+    const signer = this.requireSigner();
+    const tx = decodeTransaction(transaction);
+    this.assertPaidBy(tx, signer.publicKey);
+    const signed = await signer.signTransaction(tx);
+    return this.staking.submit(actionId, encodeTransaction(signed));
   }
 
   // ---- sending -------------------------------------------------------------------------------------------------------
@@ -240,7 +316,7 @@ export class StealthSolana {
     return signatures;
   }
 
-  /** Sends one signed transaction. Limit through the API: 60 a minute. */
+  /** Sends one signed transaction. */
   async send(base64: string): Promise<string> {
     if (this.connection) return this.connection.sendEncodedTransaction(base64, { preflightCommitment: "confirmed", maxRetries: 5 });
     return (await this.api.post<{ signature: string }>("/sol/send", { transaction: base64 })).signature;
@@ -252,10 +328,10 @@ export class StealthSolana {
     while (Date.now() < end) {
       const s = await this.status(signature).catch(() => null);
       if (s?.status === "confirmed") return;
-      if (s?.status === "failed") throw new StealthError(`Transaction ${signature} failed: ${s.error ?? "on chain"}.`);
+      if (s?.status === "failed") throw new StealthTransactionError(`Transaction ${signature} failed: ${s.error ?? "on chain"}.`, signature);
       await sleep(this.pollMs);
     }
-    throw new StealthError(`Transaction ${signature} wasn't confirmed in time. It may still land: check it before sending again.`);
+    throw new StealthTransactionError(`Transaction ${signature} wasn't confirmed in time. It may still land: check it before sending again.`, signature, { code: "confirmation_timeout" });
   }
 
   /** `pending`, `confirmed` or `failed`. */
@@ -267,7 +343,7 @@ export class StealthSolana {
     return { status: st.confirmationStatus === "processed" ? "pending" : "confirmed", error: null };
   }
 
-  /** A bundle lands whole or not at all, and Jito drops duplicates, so it's resent until the first transaction confirms. Limit: 40 a minute. */
+  /** A bundle lands whole or not at all, and Jito drops duplicates, so it's resent until the first transaction confirms. */
   private async sendBundle(encoded: string[]): Promise<string[]> {
     const end = Date.now() + this.bundleTimeoutMs;
     let signatures: string[] = [];
@@ -291,19 +367,19 @@ export class StealthSolana {
         if (s?.status === "confirmed") {
           for (const sig of signatures.slice(1)) {
             const t = await this.status(sig).catch(() => null);
-            if (t?.status === "failed") throw new StealthError(`Transaction ${sig} failed: ${t.error ?? "on chain"}.`);
+            if (t?.status === "failed") throw new StealthTransactionError(`Transaction ${sig} failed: ${t.error ?? "on chain"}.`, sig);
           }
           return signatures;
         }
-        if (s?.status === "failed") throw new StealthError(`Transaction ${signatures[0]} failed: ${s.error ?? "on chain"}.`);
+        if (s?.status === "failed") throw new StealthTransactionError(`Transaction ${signatures[0]} failed: ${s.error ?? "on chain"}.`, signatures[0] ?? null);
         if (bundleId) {
           const b = await this.api.get<{ status: string }>(`/sol/bundle/${bundleId}`).catch(() => null);
-          if (b?.status === "failed") throw new StealthError("Jito rejected the launch bundle.");
+          if (b?.status === "failed") throw new StealthTransactionError("Jito rejected the launch bundle.", signatures[0] ?? null, { code: "bundle_rejected" });
         }
       }
       await sleep(this.pollMs);
     }
-    throw new StealthError(`The bundle didn't land before its blockhash expired${lastError ? `: ${lastError}` : ""}.`);
+    throw new StealthTransactionError(`The bundle didn't land before its blockhash expired${lastError ? `: ${lastError}` : ""}.`, signatures[0] ?? null, { code: "bundle_expired" });
   }
 
   private async signAll(signer: SolanaSigner, txs: AnyTransaction[]): Promise<AnyTransaction[]> {
@@ -327,6 +403,21 @@ export class StealthSolana {
   get wallet(): SolanaSigner {
     return this.requireSigner();
   }
+}
+
+export interface MarketTradeOptions {
+  mint: string;
+  /** Buy: lamports of SOL. Sell: the token's base units. */
+  amount: bigint;
+  /** 10 to 5,000. Default 300. */
+  slippageBps?: number;
+  /** Refuses a route that moves the price more than this, in percent. Default: no limit. */
+  maxPriceImpactPct?: number;
+}
+
+export interface MarketSwapResult {
+  signature: string;
+  quote: MarketQuote;
 }
 
 export const createStealthSolana = (opts: StealthSolanaOptions = {}) => new StealthSolana(opts);

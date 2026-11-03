@@ -1,7 +1,7 @@
 {
   "name": "@juststealthit/sdk",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for Just Stealth It: launch, trade and read coins on Solana, Robinhood Chain, BNB Chain, HyperEVM, Base and Arc.",
+  "version": "0.2.0",
+  "description": "TypeScript SDK for Just Stealth It ($STEALTH): typed reads, a live stream, launches, trades and staking on Solana, Robinhood Chain, BNB Chain, HyperEVM, Base and Arc, plus read-only perps data.",
   "license": "MIT",
   "author": "Stealth",
   "type": "module",
@@ -11,15 +11,24 @@
     "url": "git+https://github.com/juststealthit/sdk.git"
   },
   "keywords": [
-    "stealth",
-    "launchpad",
-    "solana",
+    "bonding-curve",
     "evm",
-    "uniswap-v4",
+    "hyperliquid",
+    "jupiter",
+    "launchpad",
+    "memecoin",
+    "meteora",
     "pancakeswap-infinity",
+    "perps",
     "pump.fun",
     "raydium",
-    "meteora"
+    "sdk",
+    "solana",
+    "staking",
+    "stealth",
+    "typescript",
+    "uniswap-v4",
+    "websocket"
   ],
   "engines": {
     "node": ">=20"
@@ -43,21 +52,45 @@
     "./multichain": {
       "types": "./dist/multichain/index.d.ts",
       "import": "./dist/multichain/index.js"
-    }
+    },
+    "./api": {
+      "types": "./dist/api/index.d.ts",
+      "import": "./dist/api/index.js"
+    },
+    "./live": {
+      "types": "./dist/live/index.d.ts",
+      "import": "./dist/live/index.js"
+    },
+    "./math": {
+      "types": "./dist/math/index.d.ts",
+      "import": "./dist/math/index.js"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.ts",
+      "import": "./dist/utils/index.js"
+    },
+    "./perps": {
+      "types": "./dist/perps/index.d.ts",
+      "import": "./dist/perps/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run test/unit",
+    "test:watch": "vitest test/unit",
     "test:fork": "vitest run test/fork",
+    "test:live": "vitest run test/live",
+    "docs": "typedoc",
     "gen:abi": "node scripts/gen-abi.mjs",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
-    "test:live": "vitest run test/live"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "@noble/curves": "^1.9.0",
@@ -66,7 +99,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "typedoc": "^0.28.20",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "bugs": {
+    "url": "https://github.com/juststealthit/sdk/issues"
   }
 }

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "@juststealthit/sdk",
+  "entryPoints": [
+    "src/index.ts",
+    "src/api/index.ts",
+    "src/live/index.ts",
+    "src/solana/index.ts",
+    "src/evm/index.ts",
+    "src/multichain/index.ts",
+    "src/perps/index.ts",
+    "src/math/index.ts",
+    "src/utils/index.ts"
+  ],
+  "tsconfig": "tsconfig.build.json",
+  "out": "docs/api",
+  "readme": "README.md",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "includeVersion": true,
+  "sort": ["source-order"],
+  "navigationLinks": {
+    "Website": "https://juststealthit.xyz",
+    "GitHub": "https://github.com/juststealthit/sdk"
+  }
+}
