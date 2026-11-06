@@ -53,7 +53,7 @@ Every error the SDK throws on purpose extends `StealthError` and has a stable `c
 | `StealthParseError` | `invalid_response` | `request` |
 | `StealthBrowserWriteError` | `browser_write_blocked` | |
 | `StealthWebSocketError` | `websocket_error` | |
-| `StealthUnsupportedError` | `unsupported` | |
+| `StealthUnsupportedError` | `unsupported` | A coming-soon chain, or something the environment lacks |
 
 API codes you'll meet include `invalid_request` (with `issues`), `not_found`, `bad_address`, `rate_limited`, `not_configured`, `use_jupiter`, `no_route`, `unknown_chain`, `evm_disabled` and `internal_error`.
 
@@ -70,3 +70,5 @@ try {
 ```
 
 Quote `error.requestId` when you report a problem.
+
+`isStealthError` doesn't rely on `instanceof` alone: an error thrown by another installed copy of the SDK (a tool built on it, say) is recognised too. A staking call before staking opens answers 503 `not_configured`; `isStakingNotOpenError(e)` checks for exactly that.

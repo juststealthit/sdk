@@ -13,11 +13,5 @@ const chainFor = (key: EvmChainKey): Chain => {
   });
 };
 
-/** viem chains for the five EVM chains, with a public RPC each. */
-export const EVM_CHAINS: Record<EvmChainKey, Chain> = {
-  robinhood: chainFor("robinhood"),
-  bnb: chainFor("bnb"),
-  hyperevm: chainFor("hyperevm"),
-  base: chainFor("base"),
-  arc: chainFor("arc"),
-};
+/** viem chains for the live EVM chains, with a public RPC each. */
+export const EVM_CHAINS = Object.fromEntries((Object.keys(EVM_DEPLOYMENTS) as EvmChainKey[]).map((k) => [k, chainFor(k)])) as Record<EvmChainKey, Chain>;

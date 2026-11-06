@@ -14,6 +14,7 @@ import {
   StealthTimeoutError,
 } from "../../src/shared/errors.js";
 import { paginate } from "../../src/shared/paginate.js";
+import { SDK_VERSION } from "../../src/shared/version.js";
 import { backoffDelay, parseRetryAfter, resolveRetry, sleep } from "../../src/shared/retry.js";
 import { fakeApi, reply } from "./helpers.js";
 
@@ -144,7 +145,7 @@ describe("request ids, headers and hooks", () => {
     expect(calls[0]!.headers.get("x-request-id")).toBeNull();
     expect(calls[0]!.headers.get("authorization")).toBe("Bearer t");
     expect(calls[0]!.headers.get("x-extra")).toBe("1");
-    expect(calls[0]!.headers.get("x-stealth-sdk")).toBe("0.2.0");
+    expect(calls[0]!.headers.get("x-stealth-sdk")).toBe(SDK_VERSION);
   });
 
   it("calls onRequest and onResponse for every try", async () => {

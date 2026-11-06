@@ -1,7 +1,7 @@
 {
   "name": "@juststealthit/sdk",
-  "version": "0.2.0",
-  "description": "TypeScript SDK for Just Stealth It ($STEALTH): typed reads, a live stream, launches, trades and staking on Solana, Robinhood Chain, BNB Chain, HyperEVM, Base and Arc, plus read-only perps data.",
+  "version": "0.3.0",
+  "description": "TypeScript SDK for Just Stealth It ($STEALTH): typed reads, a live stream, launches, trades and staking on Solana, Robinhood Chain, BNB Chain, HyperEVM, Base and Arc, external trending coins from every chain, plus read-only perps data and the shared keystore for the Stealth CLI and MCP server.",
   "license": "MIT",
   "author": "Stealth",
   "type": "module",
@@ -72,6 +72,10 @@
     "./perps": {
       "types": "./dist/perps/index.d.ts",
       "import": "./dist/perps/index.js"
+    },
+    "./keystore": {
+      "types": "./dist/keystore/index.d.ts",
+      "import": "./dist/keystore/index.js"
     },
     "./package.json": "./package.json"
   },

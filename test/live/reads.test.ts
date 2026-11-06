@@ -21,7 +21,8 @@ describe("the live API agrees with the SDK", () => {
   it("has the same launch types", async () => {
     const cfg = await sol.getConfig();
     const ids = (cfg.feeModes as { id: string }[]).map((m) => m.id).sort();
-    expect(ids).toEqual(["buyback", "creator", "diamond", "feed", "holders", "liquidity", "marketing", "mix", "social", "team", "wallet"]);
+    // every type the SDK launches is offered; the server may offer more that the SDK doesn't launch yet
+    expect(ids).toEqual(expect.arrayContaining(["buyback", "creator", "diamond", "feed", "holders", "liquidity", "marketing", "mix", "social", "team", "wallet"]));
   });
 
   it("offers the 20 Meteora pairs", async () => {
@@ -97,5 +98,33 @@ describe("the typed read client, against production", () => {
   it("agrees with the SDK's EVM chain list", async () => {
     const cfg = await stealth.evm.config();
     for (const c of cfg.chains) expect(EVM_DEPLOYMENTS[c.id as EvmChainKey]?.chainId).toBe(c.chainId);
+  });
+
+  it("reads 0.3's routes: Trending everywhere, external coins, staking status, the buy-back bot", async () => {
+    const trending = await stealth.market.trending();
+    expect(Array.isArray(trending.coins)).toBe(true);
+    expect(typeof trending.outside).toBe("boolean");
+    for (const c of trending.coins) expect(typeof c.onPlatform).toBe("boolean");
+    const ext = trending.coins.find((c) => !c.onPlatform);
+    if (ext) {
+      const page = await stealth.sol.market.coin(ext.address, { chain: ext.chain }).catch(() => null);
+      if (page) expect(page.chain).toBe(ext.chain);
+      expect(Array.isArray(await stealth.sol.market.candles(ext.address, "1m", { chain: ext.chain }).catch(() => []))).toBe(true);
+    }
+    const all = await stealth.market.list();
+    for (const row of all.items) if (row.outside) expect(row.sol ?? row.evm).toBeUndefined();
+    expect(["open", "not_open"]).toContain((await stealth.staking.status()).state);
+    const bot = await stealth.sol.burn.bot();
+    if (bot) expect(typeof bot.status).toBe("string");
+    expect(typeof (await stealth.platform.health()).status).toBe("string");
+    expect(typeof (await stealth.multichain.config()).enabled).toBe("boolean");
+  });
+
+  it("serves 1m candles where 1s used to be", async () => {
+    const { items } = await stealth.sol.tokens.list({ sort: "volume" });
+    const coin = items[0];
+    if (!coin) return;
+    const candles = await stealth.sol.tokens.candles(coin.address, { interval: "1m" });
+    if (candles.length > 1) expect((candles[1]!.time - candles[0]!.time) % 60).toBe(0);
   });
 });

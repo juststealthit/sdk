@@ -8,8 +8,8 @@ import type { ApiClient, RequestOptions } from "../shared/api.js";
 import { StealthInputError } from "../shared/errors.js";
 import { paginate, type PaginateOptions, type Paginator } from "../shared/paginate.js";
 import { isSolanaAddress } from "../utils/address.js";
-import { flag, orNull, stagesParam, type ApiCandle, type ApiTrade, type CandleInterval, type CursorPage, type SolApiToken, type TokenFilters, type TokenListOptionsBase, type TokenStage } from "./common.js";
-import type { CoinMarketing, CoinMarketingStats, MarketingLeaderboard, MarketingOverview, MarketingSummary, MarketingTier } from "./marketing.js";
+import { flag, normalizeCandleInterval, orNull, stagesParam, type ApiCandle, type ApiTrade, type CandleInterval, type CursorPage, type SolApiToken, type TokenFilters, type TokenListOptionsBase, type TokenStage } from "./common.js";
+import type { CoinMarketing, CoinMarketingStats, MarketingAnalytics, MarketingLeaderboard, MarketingOverview, MarketingSummary, MarketingTier } from "./marketing.js";
 import { SolMarketApi } from "./sol-market.js";
 import { SolWalletsApi } from "./wallets.js";
 
@@ -156,6 +156,57 @@ export interface SolTokenDetail extends SolApiToken {
   creatorBalance: number;
   creatorSold: boolean;
   hidden: boolean;
+  sol: SolApiToken["sol"] & {
+    /** A creator change that takes effect at `effectiveAt` (unix ms), or `null`. */
+    pendingRecipient?: { toKind: string; toWallet: string | null; toProvider: string | null; toHandle: string | null; effectiveAt: number; reason: string | null } | null;
+  };
+}
+
+/** Whether a wallet can apply to take over a coin's creator fees (CTO). */
+export interface CtoEligibility {
+  /** The wallet's holding, in 18-decimal units. "0" without `wallet`. */
+  holdingWei: string;
+  /** What an applicant must hold, in 18-decimal units. */
+  minHoldingWei: string;
+  /** Unix ms. */
+  opensAt: number;
+  eligible: boolean;
+  reason: "ok" | "takeovers_unavailable" | "not_open_yet" | "claimed_by_handle" | "already_creator" | "insufficient_holding" | "open_application" | (string & {});
+}
+
+/** A takeover application, status only. */
+export interface CtoApplication {
+  id: number;
+  chain: "solana";
+  token: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  applicant: string;
+  payoutWallet: string;
+  status: string;
+  createdAt: number | string;
+  updatedAt: number | string;
+}
+
+/** The $STEALTH buy-back bot: paid by the coin's own fees, alternating burns and sends to the staking reserve. */
+export interface BuybackBotStatus {
+  mode: "buy" | "buy_burn" | "buy_send" | (string & {});
+  everyMin: number;
+  reserveSol: number;
+  updatedAt: number | null;
+  status: "not_configured" | "paused" | "low_balance" | "live" | (string & {});
+  wallet: string | null;
+  /** An explorer link to the bot's wallet. */
+  solscan: string | null;
+  balanceSol: number | null;
+  spendableSol: number | null;
+  nextBuySol: number | null;
+  runwayDays: number | null;
+  lastRunAt: number | null;
+  nextAt: number | null;
+  totals: { buys: number; solSpent: number; tokensBurned: number };
+  /** `buyTx` / `burnTx` are explorer links. */
+  recent: { time: number; solSpent: number; tokensBurned: number; buyTx: string | null; burnTx: string | null }[];
 }
 
 export interface SolHolder {
@@ -247,6 +298,7 @@ export interface TokenFeePlan {
   liquidity?: { status: string; venue: string; lpMethod: string | null; coinIn: string | null; quoteIn: string | null; position: string | null; addTx: string | null; time: number }[];
 }
 
+/** A coin's buy-backs. `buyTx` and `burnTx` are explorer links, not bare signatures. */
 export interface TokenBuybacks {
   totals: { buys: number; solSpent: number; tokensBurned: number };
   recent: ({ time: number; solSpent: number; buyTx: string; burnTx: string | null } & ({ tokensBurned: number } | { target: string; targetRaw: string }))[];
@@ -523,9 +575,12 @@ export class SolTokensApi {
     return orNull(this.get(mint, opts));
   }
 
-  /** Candles, oldest first, at most 3,000, gaps filled flat. Prices in SOL per token, `volume` in USD. */
+  /**
+   * Candles, oldest first, at most 3,000. A candle only forms where someone traded (a quiet stretch adds none; the next one opens at
+   * the last close). Prices in SOL per token, `volume` in USD. Default `1m`; `1s` is gone and read as `1m`.
+   */
   async candles(mint: string, o: SolCandleOptions = {}, opts?: RequestOptions) {
-    return this.api.get<ApiCandle[]>(`/sol/tokens/${mintPath(mint)}/candles`, { interval: o.interval, from: o.from, to: o.to }, opts);
+    return this.api.get<ApiCandle[]>(`/sol/tokens/${mintPath(mint)}/candles`, { interval: normalizeCandleInterval(o.interval), from: o.from, to: o.to }, opts);
   }
 
   /** One page of trades, newest first, 50 at a time. */
@@ -578,7 +633,7 @@ export class SolTokensApi {
     return this.api.get<TokenRewards>(`/sol/tokens/${mintPath(mint)}/rewards`, undefined, opts);
   }
 
-  /** When the fee bot next runs for this coin. */
+  /** When the fee bot next runs. The schedule is the bot's, the same for every coin; the mint is only checked for its form. */
   async payout(mint: string, opts?: RequestOptions) {
     return this.api.get<PayoutStatus>(`/sol/tokens/${mintPath(mint)}/payout`, undefined, opts);
   }
@@ -591,6 +646,11 @@ export class SolTokensApi {
   /** A Marketing coin's raise, rank and events. */
   async marketingStats(mint: string, opts?: RequestOptions) {
     return this.api.get<CoinMarketingStats>(`/sol/tokens/${mintPath(mint)}/marketing/stats`, undefined, opts);
+  }
+
+  /** Whether takeovers are open on a coin, and, with `wallet`, whether that wallet can apply. */
+  async ctoEligibility(mint: string, wallet?: string, opts?: RequestOptions) {
+    return this.api.get<CtoEligibility>(`/sol/tokens/${mintPath(mint)}/cto/eligibility`, { wallet: wallet === undefined ? undefined : mintPath(wallet) }, opts);
   }
 
   /** The coin's metadata JSON, as its on-chain URI serves it. */
@@ -631,6 +691,11 @@ export class SolBurnApi {
   async next(opts?: RequestOptions) {
     return this.api.get<BurnSchedule>("/sol/burn/next", undefined, opts);
   }
+
+  /** The buy-back bot: its mode, wallet, runway and recent buys. `null` on a server without one. */
+  async bot(opts?: RequestOptions) {
+    return orNull(this.api.get<BuybackBotStatus>("/sol/burn/bot", undefined, opts));
+  }
 }
 
 /** Solana's marketing ladder across coins. */
@@ -649,6 +714,10 @@ export class SolMarketingApi {
   }
   async leaderboard(range: "7d" | "30d" | "all" = "7d", opts?: RequestOptions) {
     return this.api.get<MarketingLeaderboard>("/sol/marketing/leaderboard", { range }, opts);
+  }
+  /** Raised and spent over time, by coin, weekday and month, and the campaigns in progress. */
+  async analytics(opts?: RequestOptions) {
+    return this.api.get<MarketingAnalytics>("/sol/marketing/analytics", undefined, opts);
   }
 }
 
@@ -709,6 +778,8 @@ export class SolApi {
    * {@link SolMarketApi.quote} for those. `amount` is lamports on a buy, token base units (6 decimals) on a sell.
    */
   async quote(mint: string, side: "buy" | "sell", amount: bigint | string, slippageBps = 300, opts?: RequestOptions) {
+    // the swap refuses what the quote would silently clamp, so both take the same range
+    if (!Number.isInteger(slippageBps) || slippageBps < 10 || slippageBps > 5_000) throw new StealthInputError("slippageBps is 10 to 5,000.");
     return this.api.get<SolApiQuote>("/sol/quote", { mint: mintPath(mint), side, amount: amount.toString(), slippageBps }, { cache: false, ...opts });
   }
 
@@ -720,6 +791,11 @@ export class SolApi {
   /** A bundle's status. */
   async bundleStatus(id: string, opts?: RequestOptions) {
     return this.api.get<{ status: "pending" | "landed" | "failed" | "invalid" | "unknown" }>(`/sol/bundle/${id}`, undefined, { cache: false, ...opts });
+  }
+
+  /** A wallet's takeover applications, status only. */
+  async ctoApplications(wallet: string, opts?: RequestOptions) {
+    return this.api.get<CtoApplication[]>("/sol/cto/mine", { wallet: mintPath(wallet) }, opts);
   }
 
   /** Lamports, and the balance of `mint` if given (SPL and Token-2022 summed). */

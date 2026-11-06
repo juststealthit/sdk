@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getAddress } from "viem";
 
 import { createStealthClient, StealthApiError, StealthInputError } from "../../src/index.js";
 import { fakeApi, reply } from "./helpers.js";
@@ -286,7 +287,8 @@ describe("EVM reads", () => {
 
   it("refuses unknown chains and bad addresses", async () => {
     const { stealth } = client();
-    expect(() => stealth.evm.chain("ethereum" as never)).toThrow(StealthInputError);
+    expect(() => stealth.evm.chain("polygon" as never)).toThrow(StealthInputError);
+    expect(() => stealth.evm.chain("ethereum" as never)).toThrow(/coming soon/);
     await expect(stealth.evm.chain("bnb").getToken("0x12")).rejects.toBeInstanceOf(StealthInputError);
   });
 
@@ -340,7 +342,7 @@ describe("staking", () => {
     await stealth.staking.prepareStake("stealth", WALLET, 10n);
     expect(calls[calls.length - 1]!.body).toEqual({ owner: WALLET, amount: "10" });
     await stealth.staking.prepareUnstake("stealth", WALLET, "3");
-    expect(await stealth.staking.submit(1, "SIGNED")).toEqual({ signature: "S", status: "confirmed" });
+    expect(await stealth.staking.submit(1, "A".repeat(120))).toEqual({ signature: "S", status: "confirmed" });
     await expect(stealth.staking.prepareStake("stealth", WALLET, 0n)).rejects.toBeInstanceOf(StealthInputError);
     await expect(stealth.staking.submit(0, "x")).rejects.toBeInstanceOf(StealthInputError);
   });
@@ -353,10 +355,15 @@ describe("staking", () => {
 
 describe("multichain groups and social", () => {
   it("returns null for a coin without a group", async () => {
-    const { stealth } = client({ "GET /multichain/coins/base/0xabc": reply(404, { error: "not_found" }), "GET /multichain/groups/g1": { id: "g1", coins: [] }, "GET /multichain/groups": { coins: [{ groupId: "g1" }] } });
+    const G = "0b6f4c1e-2a8d-4f6b-9c3e-7d5a1b2c3d4e";
+    const { stealth, calls } = client({ "GET /multichain/coins/base/0xabc": reply(404, { error: "not_found" }), [`GET /multichain/groups/${G}`]: { id: G, coins: [] }, "GET /multichain/groups": { coins: [{ groupId: G }] } });
     expect(await stealth.multichain.ofCoin("base", "0xabc")).toBeNull();
-    expect((await stealth.multichain.get("g1"))?.id).toBe("g1");
-    expect(await stealth.multichain.list()).toEqual([{ groupId: "g1" }]);
+    expect((await stealth.multichain.get(G))?.id).toBe(G);
+    expect(await stealth.multichain.get("../x")).toBeNull();
+    // EVM coins are stored checksummed: a lower-case address is checksummed before the lookup
+    await stealth.multichain.ofCoin("base", TOKEN.replace("0x1111", "0xabcd"));
+    expect(last(calls)).toBe(`/multichain/coins/base/${getAddress(TOKEN.replace("0x1111", "0xabcd"))}`);
+    expect(await stealth.multichain.list()).toEqual([{ groupId: G }]);
   });
 
   it("looks up social accounts", async () => {

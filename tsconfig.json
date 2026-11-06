@@ -23,7 +23,8 @@
       "@juststealthit/sdk/live": ["./src/live/index.ts"],
       "@juststealthit/sdk/math": ["./src/math/index.ts"],
       "@juststealthit/sdk/utils": ["./src/utils/index.ts"],
-      "@juststealthit/sdk/perps": ["./src/perps/index.ts"]
+      "@juststealthit/sdk/perps": ["./src/perps/index.ts"],
+      "@juststealthit/sdk/keystore": ["./src/keystore/index.ts"]
     }
   },
   "include": ["src", "test", "examples"]

@@ -29,6 +29,7 @@ import {
   type EvmTaxBps,
 } from "./constants.js";
 import { EVM_DEPLOYMENTS, type EvmChainKey, type EvmDeployment } from "./deployments.js";
+import { requireLiveChain } from "../utils/chains.js";
 
 export interface StealthEvmOptions {
   chain: EvmChainKey;
@@ -261,11 +262,12 @@ export function checkLaunchInput(input: EvmLaunchInput) {
   checkBps("maxBuyBps", input.maxBuyBps, LIMITS.maxBuyBps.min, LIMITS.maxBuyBps.max);
   const limited = !!input.maxWalletBps || !!input.maxBuyBps;
   const window = input.limitsWindow ?? 0;
-  if (limited ? window < 1 || window > LIMITS.limitsWindowSec : window !== 0) throw new StealthInputError(`limitsWindow is 1 to ${LIMITS.limitsWindowSec} seconds with a limit, and unset without one.`);
+  if (!Number.isInteger(window) || (limited ? window < 1 || window > LIMITS.limitsWindowSec : window !== 0)) throw new StealthInputError(`limitsWindow is 1 to ${LIMITS.limitsWindowSec} seconds with a limit, and unset without one.`);
   const lock = input.firstBuyLock ?? 0;
-  if (lock < 0 || lock > LIMITS.firstBuyLockSec) throw new StealthInputError("firstBuyLock is at most 90 days.");
+  if (!Number.isInteger(lock) || lock < 0 || lock > LIMITS.firstBuyLockSec) throw new StealthInputError("firstBuyLock is a whole number of seconds, at most 90 days.");
+  // 10,000 would make minTokensOut 0: no protection at all on the first buy
   const slippage = input.slippageBps ?? 0;
-  if (!Number.isInteger(slippage) || slippage < 0 || slippage > 10_000) throw new StealthInputError("slippageBps is 0 to 10,000.");
+  if (!Number.isInteger(slippage) || slippage < 0 || slippage >= 10_000) throw new StealthInputError("slippageBps is 0 to 9,999.");
   if ((input.firstBuy ?? 0n) < 0n) throw new StealthInputError("firstBuy can't be negative.");
 }
 
@@ -292,10 +294,12 @@ export class StealthEvm {
   private readonly quoterAbi;
 
   constructor(opts: StealthEvmOptions) {
-    const deployment = EVM_DEPLOYMENTS[opts.chain];
+    // a coming-soon chain is refused with a clear message; aliases such as "bsc" are read as their key
+    const key = requireLiveChain(String(opts.chain), "evm").key as EvmChainKey;
+    const deployment = Object.prototype.hasOwnProperty.call(EVM_DEPLOYMENTS, key) ? EVM_DEPLOYMENTS[key] : undefined;
     if (!deployment) throw new StealthInputError(`Unknown chain ${String(opts.chain)}.`);
     this.deployment = deployment;
-    this.chain = EVM_CHAINS[opts.chain];
+    this.chain = EVM_CHAINS[key];
     this.publicClient = opts.publicClient ?? (createPublicClient({ chain: this.chain, transport: http(opts.rpcUrl ?? deployment.rpcUrl) }) as PublicClient);
     this.walletClient = opts.walletClient;
     this.abis = abisFor(deployment.dex);

@@ -7,8 +7,12 @@
 import type { ApiClient, RequestOptions } from "../shared/api.js";
 import { StealthInputError } from "../shared/errors.js";
 import { paginate, type PaginateOptions, type Paginator } from "../shared/paginate.js";
-import { isEvmAddress } from "../utils/address.js";
+import { getAddress } from "viem";
+
+import { isEvmAddress, isSolanaAddress } from "../utils/address.js";
+import { LIVE_EVM_CHAIN_KEYS, requireLiveChain, type LiveEvmChainKey } from "../utils/chains.js";
 import {
+  normalizeCandleInterval,
   orNull,
   flag,
   stagesParam,
@@ -22,9 +26,9 @@ import {
   type TokenStage,
 } from "./common.js";
 
-/** The EVM chains the API serves. */
-export type EvmApiChain = "robinhood" | "bnb" | "hyperevm" | "base" | "arc";
-export const EVM_API_CHAINS = ["robinhood", "bnb", "hyperevm", "base", "arc"] as const satisfies readonly EvmApiChain[];
+/** The EVM chains the API serves: the live EVM chains of the registry. Coming-soon chains are refused before any request. */
+export type EvmApiChain = LiveEvmChainKey;
+export const EVM_API_CHAINS: readonly EvmApiChain[] = LIVE_EVM_CHAIN_KEYS;
 
 export interface EvmConfigChain {
   id: EvmApiChain;
@@ -155,6 +159,7 @@ export interface EvmPot {
 /** Buy back and burn totals. `solSpent` is in the chain's native coin (the API keeps a historic name). */
 export interface EvmBuybacks {
   totals: { buys: number; solSpent: number; tokensBurned: number };
+  /** `buyTx` and `burnTx` are explorer links to the transaction, not bare hashes. */
   recent: { time: number; solSpent: number; tokensBurned: number; buyTx: string; burnTx: string }[];
 }
 
@@ -231,10 +236,11 @@ export interface EvmCandleOptions {
 export type { CoinRef, TierStatus, MarketingTier, MarketingOverview, MarketingSummary, MarketingLeaderboard, CoinMarketing, CoinMarketingStats, MarketingAnalytics } from "./marketing.js";
 import type { CoinMarketing, CoinMarketingStats, MarketingAnalytics, MarketingLeaderboard, MarketingOverview, MarketingSummary, MarketingTier } from "./marketing.js";
 
-const assertChain = (chain: string): EvmApiChain => {
-  if (!(EVM_API_CHAINS as readonly string[]).includes(chain)) throw new StealthInputError(`Unknown EVM chain ${chain}. Use one of ${EVM_API_CHAINS.join(", ")}.`);
-  return chain as EvmApiChain;
+const solOwner = (owner: string) => {
+  if (!isSolanaAddress(owner)) throw new StealthInputError(`${owner} isn't a Solana wallet. A hidden EVM wallet belongs to a Solana wallet.`);
+  return owner;
 };
+const assertChain = (chain: string): EvmApiChain => requireLiveChain(chain, "evm").key as EvmApiChain;
 const assertAddress = (a: string) => {
   if (!/^0x[0-9a-fA-F]{40}$/.test(a)) throw new StealthInputError(`${a} isn't an EVM address.`);
   return a;
@@ -253,7 +259,7 @@ export class EvmChainApi {
     this.base = `/evm/chains/${this.chain}`;
   }
 
-  /** The native coin's USD price. `stale` while the server has none. */
+  /** The native coin's USD price. `stale` while the server has none; `updatedAt` is the server's clock, not the price's age. */
   async nativePrice(opts?: RequestOptions) {
     return this.api.get<{ usd: number; updatedAt: number; stale: boolean }>(`${this.base}/eth-price`, undefined, opts);
   }
@@ -275,7 +281,9 @@ export class EvmChainApi {
 
   /** Name, ticker or address prefix. `limit` up to 20, default 8. */
   async searchTokens(q: string, limit = 8, opts?: RequestOptions) {
-    return this.api.get<EvmApiToken[]>(`${this.base}/tokens/search`, { q, limit }, opts);
+    // the board matches addresses in their checksummed form, so a full address in any case is checksummed first
+    const query = /^0x[0-9a-fA-F]{40}$/.test(q.trim()) ? getAddress(q.trim().toLowerCase()) : q;
+    return this.api.get<EvmApiToken[]>(`${this.base}/tokens/search`, { q: query, limit }, opts);
   }
 
   /** A coin with its pool and fee books. Throws `not_found` (404) for an unknown address; see {@link findToken}. */
@@ -288,9 +296,12 @@ export class EvmChainApi {
     return orNull(this.getToken(address, opts));
   }
 
-  /** Candles, oldest first, at most 2,000. Gaps are filled with flat candles. */
+  /**
+   * Candles, oldest first, at most 3,000. A candle only forms where someone traded: a quiet stretch adds none, and the next candle
+   * opens at the last close. Default `1m`; `1s` is gone and read as `1m`.
+   */
   async getCandles(address: string, o: EvmCandleOptions = {}, opts?: RequestOptions) {
-    return this.api.get<ApiCandle[]>(`${this.base}/tokens/${assertAddress(address)}/candles`, { interval: o.interval, from: o.from, to: o.to }, opts);
+    return this.api.get<ApiCandle[]>(`${this.base}/tokens/${assertAddress(address)}/candles`, { interval: normalizeCandleInterval(o.interval), from: o.from, to: o.to }, opts);
   }
 
   /** One page of trades, newest first, 50 at a time. */
@@ -323,10 +334,12 @@ export class EvmChainApi {
    * For a quote straight from the chain's quoter, use `StealthEvm.quoteBuy` / `quoteSell`.
    */
   async quote(address: string, side: "buy" | "sell", amount: bigint | string, slippageBps?: number, opts?: RequestOptions) {
+    if (!/^\d{1,78}$/.test(amount.toString()) || BigInt(amount) <= 0n) throw new StealthInputError("amount is a whole number of base units above 0.");
+    if (slippageBps !== undefined && (!Number.isInteger(slippageBps) || slippageBps < 10 || slippageBps > 5_000)) throw new StealthInputError("slippageBps is 10 to 5,000.");
     return this.api.get<EvmApiQuote>(`${this.base}/tokens/${assertAddress(address)}/quote`, { side, amount: amount.toString(), slippageBps }, opts);
   }
 
-  /** A Holders or Diamond Hands coin's pot and payout rounds. */
+  /** A Holders or Diamond Hands coin's pot and payout rounds. 503 `not_configured` while the chain's payout bot is off. */
   async getRewards(address: string, opts?: RequestOptions) {
     return this.api.get<EvmTokenRewards>(`${this.base}/tokens/${assertAddress(address)}/rewards`, undefined, opts);
   }
@@ -406,12 +419,12 @@ export class EvmApi {
 
   /** A Solana wallet's hidden EVM wallet: balances on every chain. */
   async wallet(solanaOwner: string, opts?: RequestOptions) {
-    return this.api.get<EvmWalletView>(`/evm/wallets/${solanaOwner}`, undefined, opts);
+    return this.api.get<EvmWalletView>(`/evm/wallets/${solOwner(solanaOwner)}`, undefined, opts);
   }
 
   /** A Solana wallet's hidden EVM wallet: positions on every chain, open ones first. */
   async positions(solanaOwner: string, opts?: RequestOptions): Promise<EvmPosition[]> {
-    return (await this.api.get<{ positions: EvmPosition[] }>(`/evm/wallets/${solanaOwner}/positions`, undefined, opts)).positions;
+    return (await this.api.get<{ positions: EvmPosition[] }>(`/evm/wallets/${solOwner(solanaOwner)}/positions`, undefined, opts)).positions;
   }
 }
 

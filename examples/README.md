@@ -8,6 +8,7 @@ Each file runs with `npx tsx examples/<file>.ts`. Run `npm run build` first. Any
 | --- | --- |
 | [read-only.ts](read-only.ts) | An EVM chain's factory config, and the Solana board |
 | [board.ts](board.ts) | The cross-chain board: counts, top coins, and walking every page |
+| [trending.ts](trending.ts) | Trending from every chain, an external coin's page and chart, and site links |
 | [coin-report.ts](coin-report.ts) | One Solana coin: price, risk, holders, top traders, launch type (`MINT`) |
 | [candles-csv.ts](candles-csv.ts) | A day of 5-minute candles as CSV (`MINT`) |
 | [wallet-report.ts](wallet-report.ts) | A wallet's PnL, trades, rewards and profile (`WALLET`) |

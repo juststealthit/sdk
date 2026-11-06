@@ -42,6 +42,10 @@ export interface SocketOptions {
   heartbeat?: { intervalMs: number; message: string };
   /** A socket silent this long is treated as dead and reopened. Default: off. */
   idleTimeoutMs?: number;
+  /** A connect that hasn't opened after this long is dropped and retried. Default: `idleTimeoutMs`, or 30 s without one. */
+  connectTimeoutMs?: number;
+  /** Sends queued while closed, kept for the next open. The oldest go first past this. Default 1,000. */
+  maxQueue?: number;
 }
 
 export interface SocketHandlers {
@@ -68,6 +72,7 @@ export class ReconnectingSocket {
   private state: SocketState = "idle";
   private attempts = 0;
   private everOpened = false;
+  private stable = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private idle: ReturnType<typeof setTimeout> | null = null;
@@ -88,7 +93,8 @@ export class ReconnectingSocket {
 
   connect(): void {
     if (this.state === "closed") return;
-    if (this.ws && (this.state === "open" || this.state === "connecting")) return;
+    // a socket on its way, or a reconnect already scheduled: opening another would leave two sockets delivering every message
+    if (this.ws || this.timer) return;
     this.open();
   }
 
@@ -96,7 +102,11 @@ export class ReconnectingSocket {
   send(message: unknown): void {
     const data = typeof message === "string" ? message : JSON.stringify(message);
     if (this.ws && this.ws.readyState === OPEN) this.ws.send(data);
-    else this.queue.push(data);
+    else {
+      this.queue.push(data);
+      const max = Math.max(1, this.opts.maxQueue ?? 1_000);
+      if (this.queue.length > max) this.queue.splice(0, this.queue.length - max);
+    }
   }
 
   /** Sends only if open. Returns whether it was sent. Subscriptions use this, since `onOpen` re-sends them anyway. */
@@ -110,21 +120,30 @@ export class ReconnectingSocket {
   close(): void {
     this.setState("closed");
     this.clearTimers();
+    this.queue.length = 0;
+    this.discard(1000, "closed by client");
+  }
+
+  /** Detaches the current socket and closes it, without waiting for its close event (a dead connection may never send one). */
+  private discard(code: number, reason: string) {
     const ws = this.ws;
     this.ws = null;
-    if (ws) {
-      ws.onclose = null;
-      ws.onerror = null;
-      ws.onmessage = null;
-      try {
-        ws.close(1000, "closed by client");
-      } catch {
-        /* already closed */
-      }
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try {
+      ws.close(code, reason);
+    } catch {
+      /* already closed */
     }
   }
 
   private open() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.ws) this.discard(1000, "replaced");
     this.setState(this.everOpened || this.attempts > 0 ? "reconnecting" : "connecting");
     let ws: WebSocketLike;
     try {
@@ -134,16 +153,26 @@ export class ReconnectingSocket {
       return;
     }
     this.ws = ws;
+    this.armConnectTimeout(ws);
     ws.onopen = () => {
+      if (this.ws !== ws) return;
+      if (this.idle) clearTimeout(this.idle);
+      this.idle = null;
       const reconnect = this.everOpened;
       this.everOpened = true;
-      this.attempts = 0;
+      // the backoff resets on the first message, not on open: a server that accepts and drops at once mustn't be hammered
+      this.stable = false;
       this.setState("open");
       this.safe(() => this.handlers.onOpen?.({ reconnect }));
       while (this.queue.length && ws.readyState === OPEN) ws.send(this.queue.shift()!);
       this.startTimers();
     };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
+      if (!this.stable) {
+        this.stable = true;
+        this.attempts = 0;
+      }
       this.touch();
       const raw = typeof ev.data === "string" ? ev.data : String(ev.data);
       let data: unknown = raw;
@@ -167,8 +196,12 @@ export class ReconnectingSocket {
   }
 
   private fail(error: StealthWebSocketError) {
-    const r = { enabled: true, minDelayMs: 500, maxDelayMs: 30_000, ...this.opts.reconnect };
+    // only the options actually set: `{ minDelayMs: undefined }` keeps the default instead of making the delay NaN
+    const set = Object.fromEntries(Object.entries(this.opts.reconnect ?? {}).filter(([, v]) => v !== undefined)) as ReconnectOptions;
+    const r = { enabled: true, minDelayMs: 500, maxDelayMs: 30_000, ...set };
     this.safe(() => this.handlers.onError?.(error));
+    // an error handler may have closed the socket for good
+    if (this.state === "closed") return;
     if (!r.enabled || (r.maxAttempts !== undefined && this.attempts >= r.maxAttempts)) {
       this.setState("closed");
       return;
@@ -182,23 +215,43 @@ export class ReconnectingSocket {
     }, delay);
   }
 
+  /** A connect that never opens nor closes (a black-holed network) is dropped and retried. */
+  private armConnectTimeout(ws: WebSocketLike) {
+    const ms = this.opts.connectTimeoutMs ?? (this.opts.idleTimeoutMs || 30_000);
+    if (!(ms > 0)) return;
+    if (this.idle) clearTimeout(this.idle);
+    this.idle = setTimeout(() => {
+      this.idle = null;
+      if (this.ws !== ws || ws.readyState === OPEN) return;
+      this.drop(new StealthWebSocketError(`The stream didn't open within ${ms} ms.`), 4001, "connect timeout");
+    }, ms);
+  }
+
+  /** Gives up on the current socket now and schedules a reconnect. */
+  private drop(error: StealthWebSocketError, code: number, reason: string) {
+    if (this.state === "closed") return;
+    this.clearTimers();
+    this.discard(code, reason);
+    this.fail(error);
+  }
+
   private startTimers() {
     const hb = this.opts.heartbeat;
-    if (hb) this.heartbeat = setInterval(() => this.sendIfOpen(hb.message), hb.intervalMs);
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    if (hb && hb.intervalMs > 0) this.heartbeat = setInterval(() => this.sendIfOpen(hb.message), hb.intervalMs);
     this.touch();
   }
 
   private touch() {
     if (!this.opts.idleTimeoutMs) return;
     if (this.idle) clearTimeout(this.idle);
+    const ms = this.opts.idleTimeoutMs;
     this.idle = setTimeout(() => {
-      // a silent socket is reopened through the normal close path
-      try {
-        this.ws?.close(4000, "idle");
-      } catch {
-        /* ignore */
-      }
-    }, this.opts.idleTimeoutMs);
+      this.idle = null;
+      // a silent socket is reopened now: on a dead connection its close event can take minutes, or never come
+      this.drop(new StealthWebSocketError(`The stream was silent for ${ms} ms; reconnecting.`), 4000, "idle");
+    }, ms);
   }
 
   private clearTimers() {

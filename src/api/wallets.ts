@@ -143,24 +143,27 @@ export interface WalletAnalysis {
 
 export type WalletPeriod = { realizedUsd: number | null; costUsd: number | null; roiPct: number | null; buys: number | null; sells: number | null } | null;
 
+/** A wallet's headline figures from the market analytics feed. */
+export interface WalletMarketFigures {
+  status: AnalyticsStatus;
+  updatedAt: number | null;
+  stale: boolean;
+  reason: string | null;
+  periods: Record<PnlRange, WalletPeriod>;
+  stats: Record<"7d" | "30d", WalletStats | null>;
+  unrealizedUsd: number | null;
+  totalProfitUsd: number | null;
+  activity?: WalletActivity[];
+}
+
 /** A wallet's public profile: identity, leaderboard ranks, headline PnL and, when fresh, an analysis. */
 export interface WalletProfile {
   wallet: string;
   identity: { name: string | null; twitter: string | null; telegram: string | null; avatar: string | null; tags: string[] };
   boards: { source: string; range: "7d" | "30d"; rank: number; pnlUsd: number | null }[];
   links: Record<string, string>;
-  /** Headline figures from the analytics feed. */
-  gmgn: {
-    status: AnalyticsStatus;
-    updatedAt: number | null;
-    stale: boolean;
-    reason: string | null;
-    periods: Record<PnlRange, WalletPeriod>;
-    stats: Record<"7d" | "30d", WalletStats | null>;
-    unrealizedUsd: number | null;
-    totalProfitUsd: number | null;
-    activity?: WalletActivity[];
-  };
+  /** Headline figures from the market analytics feed. */
+  market: WalletMarketFigures;
   analysis: WalletAnalysis | null;
   analysisAt: number | null;
   /** `false`: call {@link SolWalletsApi.analysis} for a fresh one. */
@@ -222,8 +225,12 @@ export class SolWalletsApi {
   }
 
   /** The wallet's profile. `refresh` re-reads a headline older than a couple of minutes. */
-  async analytics(address: string, refresh = false, opts?: RequestOptions) {
-    return this.api.get<WalletProfile>(`/sol/wallets/${wallet(address)}/analytics`, { refresh: refresh ? 1 : undefined }, opts);
+  async analytics(address: string, refresh = false, opts?: RequestOptions): Promise<WalletProfile> {
+    // the wire names the figures after their data source; the SDK gives them a neutral name
+    const raw = await this.api.get<Omit<WalletProfile, "market"> & { market?: WalletMarketFigures; [k: string]: unknown }>(`/sol/wallets/${wallet(address)}/analytics`, { refresh: refresh ? 1 : undefined }, opts);
+    const wire = Object.keys(raw).find((k) => k !== "market" && /^g[a-z]{2}n$/.test(k) && typeof raw[k] === "object");
+    const { [wire ?? "market"]: figures, ...rest } = raw as Record<string, unknown>;
+    return { ...(rest as Omit<WalletProfile, "market">), market: (raw.market ?? figures) as WalletMarketFigures };
   }
 
   /** The last 20 on-chain actions, newest first. */

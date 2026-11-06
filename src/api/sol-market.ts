@@ -9,11 +9,30 @@
 import type { ApiClient, RequestOptions } from "../shared/api.js";
 import { StealthInputError } from "../shared/errors.js";
 import { isSolanaAddress } from "../utils/address.js";
+import { requireLiveChain } from "../utils/chains.js";
+import { DEFAULT_CANDLE_INTERVAL, normalizeCandleInterval, type CandleInterval } from "./common.js";
 
 export type MarketStatus = "ready" | "loading" | "not_configured" | "unavailable";
-/** Candle sizes the market route serves. */
+/** Candle sizes the market route serves (external coins and any Solana token). The day is a lowercase `1d` here. */
 export type MarketCandleInterval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 export const MARKET_CANDLE_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const satisfies readonly MarketCandleInterval[];
+
+/** The market route's name for a launchpad interval: `1D` → `1d`, the rest unchanged. `1s` (gone) becomes `1m`. */
+export function toMarketCandleInterval(interval: CandleInterval | MarketCandleInterval | string): MarketCandleInterval {
+  const i = normalizeCandleInterval(interval) ?? DEFAULT_CANDLE_INTERVAL;
+  return (i === "1D" ? "1d" : i) as MarketCandleInterval;
+}
+
+/** The launchpad's name for a market interval: `1d` → `1D`. */
+export function fromMarketCandleInterval(interval: MarketCandleInterval | CandleInterval | string): CandleInterval {
+  return normalizeCandleInterval(interval) ?? DEFAULT_CANDLE_INTERVAL;
+}
+
+/** Where a market read looks: Solana by default; an external EVM coin needs its chain. */
+export interface MarketCoinOptions {
+  /** A live chain key. Default `solana`. Required for a 0x address. */
+  chain?: string;
+}
 
 export interface MarketCoin {
   address: string;
@@ -41,6 +60,15 @@ export interface MarketCoin {
   /** 0 to 100. */
   top10Pct: number | null;
   onCurve: boolean | null;
+  /** On trending lists: the ranking's extra figures, when the source has them. */
+  change5mPct?: number | null;
+  change1hPct?: number | null;
+  buys?: number | null;
+  sells?: number | null;
+  supply?: number | null;
+  gasFee?: number | null;
+  lpBurned?: boolean | null;
+  lpLockedPct?: number | null;
 }
 
 export interface TrendingCoin extends MarketCoin {
@@ -64,8 +92,10 @@ export interface LauncherBest {
   athMarketCapUsd: number | null;
 }
 
-/** A coin page for any Solana mint. `est*` figures are estimates. */
+/** A coin page for any Solana mint, or an external coin on another chain. `est*` figures are estimates. */
 export interface MarketCoinDetail extends MarketCoin {
+  /** The chain asked for, filled in by the SDK: `solana`, or the EVM chain of an external coin. */
+  chain: string;
   onPlatform: boolean;
   decimals: number | null;
   totalSupply: number | null;
@@ -170,23 +200,54 @@ const mint = (m: string) => {
   if (!isSolanaAddress(m)) throw new StealthInputError(`${m} isn't a Solana address.`);
   return m;
 };
+/** A coin address and chain the market route takes: a Solana mint, or a 0x address with its EVM chain (lower-cased, as the API keys it). */
+const coinRef = (address: string, chain?: string): { address: string; chain: string | undefined } => {
+  const c = chain === undefined ? (/^0x/i.test(address) ? null : "solana") : requireLiveChain(chain).key;
+  if (c === null) throw new StealthInputError("A 0x address needs its chain: pass { chain: \"base\" } or another live EVM chain.");
+  if (c === "solana") return { address: mint(address), chain: undefined };
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new StealthInputError(`${address} isn't an EVM address.`);
+  return { address: address.toLowerCase(), chain: c };
+};
 const slip = (bps: number) => {
   if (!Number.isInteger(bps) || bps < 10 || bps > 5_000) throw new StealthInputError("slippageBps is 10 to 5,000.");
   return bps;
 };
 
+const REQUEST_KEYS = ["signal", "timeoutMs", "retry", "cache", "headers"];
+/** 0.2 took `RequestOptions` where the market options now go; an object with only those keys is still read that way. */
+function legacy<T extends object>(o: T | RequestOptions | undefined, opts: RequestOptions | undefined): [T, RequestOptions | undefined] {
+  if (o && opts === undefined) {
+    const keys = Object.keys(o);
+    if (keys.length && keys.every((k) => REQUEST_KEYS.includes(k))) return [{} as T, o as RequestOptions];
+  }
+  return [(o ?? {}) as T, opts];
+}
+
 /** Jupiter-routed market reads and swap building. */
 export class SolMarketApi {
   constructor(private readonly api: ApiClient) {}
 
-  /** A coin page for any Solana mint. */
-  async coin(address: string, opts?: RequestOptions) {
-    return this.api.get<MarketCoinDetail>(`/sol/market/coins/${mint(address)}`, undefined, opts);
+  /**
+   * A coin page for any Solana mint, or for an external trending coin on another live chain (`{ chain: "bnb" }` with its 0x address).
+   * 404 `not_found` for a coin the market data doesn't know.
+   */
+  async coin(address: string, options: MarketCoinOptions = {}, requestOpts?: RequestOptions) {
+    const [o, opts] = legacy<MarketCoinOptions>(options, requestOpts);
+    const ref = coinRef(address, o.chain);
+    const coin = await this.api.get<Omit<MarketCoinDetail, "chain"> & { chain?: string }>(`/sol/market/coins/${ref.address}`, { chain: ref.chain }, opts);
+    return { ...coin, chain: coin.chain ?? ref.chain ?? "solana" } as MarketCoinDetail;
   }
 
-  /** USD candles, oldest first. Default `5m`. */
-  async candles(address: string, interval: MarketCandleInterval = "5m", opts?: RequestOptions) {
-    return this.api.get<MarketCandle[]>(`/sol/market/coins/${mint(address)}/candles`, { interval }, opts);
+  /**
+   * USD candles, oldest first, from the coin's launch where the history is there. Default `1m`, as the site's charts open. `to`
+   * (unix seconds) pages back in time: pass the first candle's `time` to get the ones before it. `1D` and `1s` are accepted and
+   * read as `1d` and `1m`.
+   */
+  async candles(address: string, interval: MarketCandleInterval | CandleInterval = "1m", options: MarketCoinOptions & { to?: number } = {}, requestOpts?: RequestOptions) {
+    const [o, opts] = legacy<MarketCoinOptions & { to?: number }>(options, requestOpts);
+    const ref = coinRef(address, o.chain);
+    if (o.to !== undefined && !(Number.isInteger(o.to) && o.to > 0)) throw new StealthInputError("to is a positive unix time in seconds.");
+    return this.api.get<MarketCandle[]>(`/sol/market/coins/${ref.address}/candles`, { interval: toMarketCandleInterval(interval), chain: ref.chain, to: o.to }, opts);
   }
 
   /** Up to 24 trending Solana coins. */

@@ -2,7 +2,7 @@
  * Cursor pagination as an async iterator.
  *
  * ```ts
- * for await (const trade of stealth.sol.tokens.iterateTrades(mint)) console.log(trade.signature);
+ * for await (const trade of stealth.sol.tokens.iterateTrades(mint)) console.log(trade.txHash);
  * const last500 = await stealth.sol.tokens.iterateTrades(mint).take(500);
  * for await (const page of stealth.sol.tokens.iterateTrades(mint).pages()) console.log(page.items.length);
  * ```
@@ -37,7 +37,8 @@ export class Paginator<T> implements AsyncIterable<T> {
   /** Page by page. A page whose cursor repeats the last one ends the walk, so a stuck server can't loop it. */
   async *pages(): AsyncGenerator<Page<T>, void, undefined> {
     let cursor = this.opts.cursor;
-    const seen = new Set<string>();
+    // the starting cursor counts as seen: a server answering it with itself mustn't loop
+    const seen = new Set<string>(cursor ? [cursor] : []);
     for (let n = 0; this.opts.maxPages === undefined || n < this.opts.maxPages; n++) {
       if (this.opts.signal?.aborted) return;
       const page = await this.fetchPage(cursor, this.opts.signal);

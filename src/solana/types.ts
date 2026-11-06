@@ -142,7 +142,7 @@ export interface TokenPage {
 export interface TokenListOptions {
   /** Comma-separated: new, graduating, migrated. */
   stages?: string;
-  sort?: "age" | "price" | "marketCap" | "liquidity" | "volume" | "txns" | "holders" | "change5m" | "change1h" | "change24h" | "progress" | "tax";
+  sort?: "age" | "price" | "marketCap" | "liquidity" | "volume" | "txns" | "holders" | "change5m" | "change1h" | "change24h" | "progress" | "tax" | "lastTrade" | "migrated";
   dir?: "asc" | "desc";
   cursor?: string;
   q?: string;
@@ -156,22 +156,60 @@ export interface TokenListOptions {
 
 export interface LaunchPair {
   mint: string;
-  kind: string;
+  kind: "sol" | "stable" | "stock" | "token" | (string & {});
   symbol: string;
   name: string;
   logo: string | null;
   decimals: number;
-  tokenProgram: string;
-  issuer?: string | null;
-  creatorFeeConfigurable?: boolean;
+  tokenProgram: "spl" | "token2022" | (string & {});
+  issuer: string | null;
+  creatorFeeConfigurable: boolean;
+  group?: "wrapped" | "pumpCoin" | (string & {});
+  /** Base units of the pair. */
+  minRaise?: string;
   [field: string]: unknown;
 }
 
 export interface PairCatalog {
   pairs: LaunchPair[];
-  customFees?: unknown;
-  maxCreatorFeeBps?: number | null;
-  maxDepth?: number | null;
+  customFees: { protocolBps: number; creatorBps: number };
+  maxCreatorFeeBps: number;
+  maxDepth: number;
+  [field: string]: unknown;
+}
+
+/** One hit of a pair search. */
+export interface PairSearchResult {
+  mint: string;
+  symbol: string;
+  name: string;
+  logo: string | null;
+  kind: string;
+  issuer: string | null;
+  topPool: { address: string; dexId: string; url: string; liquidityUsd: number; volume24hUsd: number } | null;
+  marketCapUsd: number | null;
+  launchable: boolean;
+  reason: string | null;
+  needsConfig?: boolean;
+  configCostLamports?: string;
+  [field: string]: unknown;
+}
+
+export interface PairSearch {
+  query: string;
+  network: string;
+  results: PairSearchResult[];
+  warning: "rpc_network_mismatch" | "catalog_unavailable" | null | (string & {});
+}
+
+/** One pair's launch terms. */
+export interface PairDetail {
+  pair: LaunchPair;
+  maxFirstBuySol: number;
+  priceSol: number | null;
+  fees: { protocolBps: number; creatorBps: number; creatorMinBps: number; creatorMaxBps: number };
+  raise: number;
+  configCostLamports?: string;
   [field: string]: unknown;
 }
 

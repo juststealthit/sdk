@@ -67,6 +67,6 @@ export function effectiveAprBps(aprBps: number, boosts: readonly StakingBoost[],
 
 /** The share of an accrued reward that leaves with an unstake of `amount` out of `staked`. */
 export function rewardShare(accrued: bigint, amount: bigint, staked: bigint): bigint {
-  if (staked <= 0n) return 0n;
+  if (staked <= 0n || amount <= 0n || accrued <= 0n) return 0n;
   return amount >= staked ? accrued : (accrued * amount) / staked;
 }

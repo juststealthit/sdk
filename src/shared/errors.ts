@@ -52,8 +52,13 @@ export interface StealthErrorOptions {
   cause?: unknown;
 }
 
+/** Marks the SDK's errors, so {@link isStealthError} knows them even from another copy of the SDK in the same process. */
+const BRAND = Symbol.for("juststealthit.sdk.error");
+
 /** Base class of everything this SDK throws on purpose. */
 export class StealthError extends Error {
+  /** @internal */
+  readonly [BRAND] = true;
   /** A stable, machine-readable code. See {@link STEALTH_ERROR_CODES}. */
   readonly code: string;
 
@@ -226,5 +231,7 @@ export class StealthUnsupportedError extends StealthError {
  * ```
  */
 export function isStealthError(error: unknown, code?: string): error is StealthError & { retryAfterSec?: number | null } {
-  return error instanceof StealthError && (code === undefined || error.code === code);
+  // `instanceof` fails across two installed copies of the SDK (an app and a tool built on it, say); the brand doesn't
+  const ours = error instanceof StealthError || (typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[BRAND] === true);
+  return ours && (code === undefined || (error as StealthError).code === code);
 }

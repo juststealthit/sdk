@@ -17,9 +17,9 @@
  * @module
  */
 import { DEFAULT_API_URL } from "../shared/api.js";
-import { StealthInputError, type StealthWebSocketError } from "../shared/errors.js";
+import { StealthInputError, StealthWebSocketError } from "../shared/errors.js";
 import type { ApiCandle, ApiTrade, CandleInterval, SolApiToken } from "../api/common.js";
-import { CANDLE_INTERVALS } from "../api/common.js";
+import { normalizeCandleInterval } from "../api/common.js";
 import { isSolanaAddress } from "../utils/address.js";
 import { ReconnectingSocket, type ReconnectOptions, type SocketState, type WebSocketConstructor } from "./socket.js";
 
@@ -64,7 +64,10 @@ export interface HeadMessage {
 
 export type StreamMessage = TradeMessage | LaunchMessage | TokenMessage | CandleMessage | HeadMessage;
 
-/** A channel the stream accepts. */
+/** Channels one stream holds at most. The server ignores subscriptions past about 200 per socket. */
+export const MAX_STREAM_CHANNELS = 200;
+
+/** A channel the stream accepts. `system` is accepted but nothing is published on it today. */
 export type StreamChannel = "head" | "tokens" | "system" | `token:${string}` | `candles:${string}:${CandleInterval}`;
 
 export interface StreamOptions {
@@ -77,7 +80,10 @@ export interface StreamOptions {
   reconnect?: ReconnectOptions;
   /** How often to send an application ping. Default 25 s. `0` turns it off. */
   pingMs?: number;
-  /** Reopen a socket silent for this long. Default 90 s: the head channel or a pong should arrive well within it. */
+  /**
+   * Reopen a socket silent for this long. Default 90 s, and never under 2.5 pings: a pong answers each ping, and the head channel
+   * pushes every few seconds. Off by default when `pingMs` is 0, since a quiet channel would look dead. `0` turns it off.
+   */
   idleTimeoutMs?: number;
   /** Open the socket at once rather than on the first subscription. Default false. */
   eager?: boolean;
@@ -85,6 +91,53 @@ export interface StreamOptions {
 
 export type StreamHandler = (msg: StreamMessage) => void;
 export type Unsubscribe = () => void;
+
+/**
+ * Which trades a handler wants. Every field is optional and they all have to match. Filtering happens in the SDK: the socket still
+ * carries every trade of the channel.
+ */
+export interface TradeFilter {
+  side?: "buy" | "sell";
+  /** At least this much in USD. */
+  minValueUsd?: number;
+  /** At most this much in USD. */
+  maxValueUsd?: number;
+  /** At least this much of the native coin (SOL). */
+  minNative?: number;
+  /** Only these wallets (exact match, as Solana addresses are case-sensitive). */
+  traders?: readonly string[];
+  /** Leave out these wallets. */
+  excludeTraders?: readonly string[];
+  /** `false` leaves out the launcher's buy in the launch transaction. Default: kept. */
+  devBuys?: boolean;
+  /** Only trades that paid the anti-sniper fee (`true`) or only those that didn't (`false`). */
+  sniperTaxed?: boolean;
+}
+
+/** Whether a trade passes a {@link TradeFilter}. No filter passes everything. */
+export function matchesTrade(trade: ApiTrade, f: TradeFilter | undefined): boolean {
+  if (!f) return true;
+  if (f.side && trade.side !== f.side) return false;
+  if (f.minValueUsd !== undefined && !(trade.valueUsd >= f.minValueUsd)) return false;
+  if (f.maxValueUsd !== undefined && !(trade.valueUsd <= f.maxValueUsd)) return false;
+  if (f.minNative !== undefined && !(trade.ethAmount >= f.minNative)) return false;
+  if (f.traders && !f.traders.includes(trade.trader)) return false;
+  if (f.excludeTraders?.includes(trade.trader)) return false;
+  if (f.devBuys === false && (trade.kind === "dev_buy" || trade.isCreatorLaunchBuy)) return false;
+  if (f.sniperTaxed !== undefined && trade.sniperTaxed !== f.sniperTaxed) return false;
+  return true;
+}
+
+export interface IterateOptions<M extends StreamMessage = StreamMessage> {
+  /** Messages kept while you're busy. Past it the oldest are dropped. Default 1,000. */
+  bufferSize?: number;
+  /** Ends the loop. */
+  signal?: AbortSignal;
+  /** Only messages that pass. */
+  filter?: (msg: StreamMessage) => msg is M;
+  /** Called with how many messages were dropped because the buffer was full, each time one is. */
+  onDrop?: (droppedSoFar: number) => void;
+}
 
 /** `https://juststealthit.xyz/api` → `wss://juststealthit.xyz/api/sol/ws`. */
 export function streamUrlFor(apiUrl: string = DEFAULT_API_URL): string {
@@ -97,11 +150,12 @@ export function tokenChannel(mint: string): `token:${string}` {
   return `token:${mint.toLowerCase()}`;
 }
 
-/** The channel name for a coin's candles. */
+/** The channel name for a coin's candles. The gone `1s` interval is read as `1m`, with a one-time deprecation warning. */
 export function candleChannel(mint: string, interval: CandleInterval): `candles:${string}:${CandleInterval}` {
   if (!isSolanaAddress(mint)) throw new StealthInputError(`${mint} isn't a Solana address.`);
-  if (!(CANDLE_INTERVALS as readonly string[]).includes(interval)) throw new StealthInputError(`interval is one of ${CANDLE_INTERVALS.join(", ")}.`);
-  return `candles:${mint.toLowerCase()}:${interval}`;
+  const i = normalizeCandleInterval(interval);
+  if (!i) throw new StealthInputError("interval is required.");
+  return `candles:${mint.toLowerCase()}:${i}`;
 }
 
 const normalize = (ch: string) => ch.toLowerCase().replace(/:1d$/, ":1D");
@@ -138,7 +192,7 @@ export class StealthStream {
         WebSocket: opts.WebSocket,
         reconnect: opts.reconnect,
         heartbeat: pingMs > 0 ? { intervalMs: pingMs, message: JSON.stringify({ op: "ping" }) } : undefined,
-        idleTimeoutMs: opts.idleTimeoutMs ?? 90_000,
+        idleTimeoutMs: opts.idleTimeoutMs ?? (pingMs > 0 ? Math.max(90_000, Math.ceil(pingMs * 2.5)) : 0),
       },
     );
     if (opts.eager) this.socket.connect();
@@ -154,11 +208,17 @@ export class StealthStream {
     return this.lastHead;
   }
 
-  /** Subscribes `handler` to a raw channel. Returns a function that unsubscribes it. */
+  /**
+   * Subscribes `handler` to a raw channel. Returns a function that unsubscribes it. A stream that was closed, or gave up
+   * reconnecting, throws a {@link StealthWebSocketError}: make a new one. At most {@link MAX_STREAM_CHANNELS} channels per stream.
+   */
   subscribe(channel: StreamChannel, handler: StreamHandler): Unsubscribe {
+    if (this.state === "closed") throw new StealthWebSocketError("This stream is closed. Open a new one (StealthClient.live() does it for you).");
     const ch = normalize(channel);
     let set = this.handlers.get(ch);
     if (!set) {
+      // the server ignores channels past its cap and closes a socket that sends too fast; past this, use a second stream
+      if (this.handlers.size >= MAX_STREAM_CHANNELS) throw new StealthInputError(`A stream holds at most ${MAX_STREAM_CHANNELS} channels. Unsubscribe some, or open another stream.`);
       set = new Set();
       this.handlers.set(ch, set);
       this.socket.connect();
@@ -179,11 +239,17 @@ export class StealthStream {
     };
   }
 
-  /** Trades on one coin, or on every coin when `mint` is `null`. */
-  trades(mint: string | null, handler: (msg: TradeMessage) => void): Unsubscribe {
+  /** Trades on one coin, or on every coin when `mint` is `null`, optionally only those passing `filter`. */
+  trades(mint: string | null, handler: (msg: TradeMessage) => void, filter?: TradeFilter): Unsubscribe {
     return this.subscribe(mint === null ? "tokens" : tokenChannel(mint), (m) => {
-      if (m.type === "trade") handler(m);
+      if (m.type === "trade" && matchesTrade(m.trade, filter)) handler(m);
     });
+  }
+
+  /** {@link trades} as an async iterator: `for await (const { trade } of live.iterateTrades(mint, { filter: { side: "buy" } }))`. */
+  iterateTrades(mint: string | null, opts: Omit<IterateOptions, "filter"> & { filter?: TradeFilter } = {}): AsyncIterableIterator<TradeMessage> {
+    const { filter, ...rest } = opts;
+    return this.iterate(mint === null ? "tokens" : tokenChannel(mint), { ...rest, filter: (m): m is TradeMessage => m.type === "trade" && matchesTrade(m.trade, filter) });
   }
 
   /** Every new coin, as it launches. */
@@ -222,32 +288,70 @@ export class StealthStream {
   }
 
   /**
-   * A channel as an async iterator. Messages queue while you're busy (up to `bufferSize`, oldest dropped); breaking out of the loop
-   * unsubscribes.
+   * A channel as an async iterator. Messages queue while you're busy (up to `bufferSize`, oldest dropped, `onDrop` told); breaking
+   * out of the loop, calling `return()`, aborting `signal` or closing the stream unsubscribes at once, even while it waits.
    */
-  async *iterate(channel: StreamChannel, opts: { bufferSize?: number; signal?: AbortSignal } = {}): AsyncGenerator<StreamMessage, void, undefined> {
-    const max = opts.bufferSize ?? 1_000;
-    const queue: StreamMessage[] = [];
-    let wake: (() => void) | null = null;
-    const off = this.subscribe(channel, (m) => {
-      queue.push(m);
-      if (queue.length > max) queue.shift();
-      wake?.();
-    });
-    const onAbort = () => wake?.();
-    opts.signal?.addEventListener("abort", onAbort);
-    const offState = this.onStateChange(() => wake?.());
-    try {
-      while (!opts.signal?.aborted && this.state !== "closed") {
-        if (!queue.length) await new Promise<void>((r) => (wake = r));
-        wake = null;
-        while (queue.length) yield queue.shift()!;
-      }
-    } finally {
-      opts.signal?.removeEventListener("abort", onAbort);
-      offState();
+  iterate<M extends StreamMessage = StreamMessage>(channel: StreamChannel, opts: IterateOptions<M> = {}): AsyncIterableIterator<M> {
+    const max = Math.max(1, opts.bufferSize ?? 1_000);
+    const queue: M[] = [];
+    let dropped = 0;
+    let finished = false;
+    let waiting: ((r: IteratorResult<M>) => void) | null = null;
+    const done = (): IteratorResult<M> => ({ value: undefined, done: true });
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       off();
-    }
+      offState();
+      opts.signal?.removeEventListener("abort", finish);
+      queue.length = 0;
+      const w = waiting;
+      waiting = null;
+      w?.(done());
+    };
+    const off = this.subscribe(channel, (m) => {
+      if (opts.filter && !opts.filter(m)) return;
+      if (waiting) {
+        const w = waiting;
+        waiting = null;
+        w({ value: m as M, done: false });
+        return;
+      }
+      queue.push(m as M);
+      if (queue.length > max) {
+        queue.shift();
+        dropped++;
+        try {
+          opts.onDrop?.(dropped);
+        } catch {
+          /* the caller's callback mustn't break the stream */
+        }
+      }
+    });
+    const offState = this.onStateChange((s) => {
+      if (s === "closed") finish();
+    });
+    if (opts.signal?.aborted || this.state === "closed") finish();
+    else opts.signal?.addEventListener("abort", finish, { once: true });
+    const it: AsyncIterableIterator<M> = {
+      next: () => {
+        if (queue.length) return Promise.resolve({ value: queue.shift()!, done: false });
+        if (finished) return Promise.resolve(done());
+        return new Promise((resolve) => {
+          waiting = resolve;
+        });
+      },
+      return: () => {
+        finish();
+        return Promise.resolve(done());
+      },
+      throw: (error?: unknown) => {
+        finish();
+        return Promise.reject(error);
+      },
+      [Symbol.asyncIterator]: () => it,
+    };
+    return it;
   }
 
   /** Called after every reconnect. Messages sent while the socket was down are gone: refetch what you show. */
@@ -272,10 +376,13 @@ export class StealthStream {
     return [...this.handlers.keys()];
   }
 
-  /** Closes the socket for good and drops every handler. */
+  /** Closes the socket for good and drops every handler. Open iterators end. */
   close(): void {
     this.handlers.clear();
     this.socket.close();
+    this.reconnectListeners.clear();
+    this.stateListeners.clear();
+    this.errorListeners.clear();
   }
 
   private dispatch(data: unknown) {
@@ -312,13 +419,20 @@ export function pollTrades(read: TradePageReader, token: string, handler: (trade
   const tick = async () => {
     try {
       const { items } = await read(token);
+      // stopped while the request was out: nothing more reaches the handler
+      if (stopped) return;
       const fresh = items.filter((t) => !seen.has(t.id)).reverse();
       for (const t of items) seen.add(t.id);
       if (seen.size > 5_000) for (const id of [...seen].slice(0, seen.size - 2_000)) seen.delete(id);
       if (!first) for (const t of fresh) handler(t);
       first = false;
     } catch (e) {
-      opts.onError?.(e);
+      if (stopped) return;
+      try {
+        opts.onError?.(e);
+      } catch {
+        /* keep polling */
+      }
     }
     if (!stopped) timer = setTimeout(tick, opts.intervalMs ?? 4_000);
   };

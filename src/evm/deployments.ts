@@ -1,7 +1,15 @@
-// Generated from the deployment records. Public contract addresses only.
+// From the deployment records. Public contract addresses only.
+//
+// This is the one place contract addresses live. A chain gets an entry here once its deploy is checked on chain, never before.
+// Ethereum, Arbitrum One and Avalanche C-Chain are deploying now and have none yet: they are `coming_soon` in utils/chains.ts.
+// To add one, set its status to "live" in utils/chains.ts; `EvmChainKey` then includes it and this record won't compile until
+// its entry (addresses, RPC, start block) is here. EVM_CHAINS, EVM_API_CHAINS and MULTICHAIN_CHAINS follow on their own.
 import type { Address } from "viem";
 
-export type EvmChainKey = "robinhood" | "bnb" | "hyperevm" | "base" | "arc";
+import type { LiveEvmChainKey } from "../utils/chains.js";
+
+/** The live EVM chains: the ones with contracts below. */
+export type EvmChainKey = LiveEvmChainKey;
 export type EvmDex = "v4" | "infinity";
 
 export interface EvmDeployment {

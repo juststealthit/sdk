@@ -14,6 +14,7 @@ import {
   infinityAbis,
   quoterAbiFor,
   StealthInputError,
+  StealthUnsupportedError,
   v4Abis,
   type EvmChainKey,
 } from "../../src/evm/index.js";
@@ -52,8 +53,12 @@ describe("deployments", () => {
     expect(JSON.stringify(quoterAbiFor("infinity"))).toContain("parameters");
   });
 
-  it("refuses a chain it doesn't know", () => {
-    expect(() => createStealthEvm({ chain: "ethereum" as EvmChainKey })).toThrow(/Unknown chain/);
+  it("refuses a chain it doesn't know, and says a coming-soon chain is coming soon", () => {
+    expect(() => createStealthEvm({ chain: "polygon" as EvmChainKey })).toThrow(/Unknown EVM chain/);
+    expect(() => createStealthEvm({ chain: "ethereum" as EvmChainKey })).toThrow(StealthUnsupportedError);
+    expect(() => createStealthEvm({ chain: "arbitrum" as EvmChainKey })).toThrow(/coming soon: its contracts are being deployed/);
+    expect(() => createStealthEvm({ chain: "xlayer" as EvmChainKey })).toThrow(/X Layer is coming soon\. /);
+    expect(createStealthEvm({ chain: "bsc" as EvmChainKey }).deployment.key).toBe("bnb");
   });
 
   it("needs a wallet to write, not to read", async () => {

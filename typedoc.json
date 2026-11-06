@@ -10,7 +10,8 @@
     "src/multichain/index.ts",
     "src/perps/index.ts",
     "src/math/index.ts",
-    "src/utils/index.ts"
+    "src/utils/index.ts",
+    "src/keystore/index.ts"
   ],
   "tsconfig": "tsconfig.build.json",
   "out": "docs/api",

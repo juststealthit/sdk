@@ -30,19 +30,26 @@ export function formatCompact(n: number | null | undefined, small = 2, opts: Sig
   if (bad(n)) return opts.empty ?? "—";
   const abs = Math.abs(n);
   const sign = n < 0 ? (opts.minus ?? MINUS) : "";
-  for (const [value, suffix] of [
+  const units = [
     [1e12, "T"],
     [1e9, "B"],
     [1e6, "M"],
     [1e3, "K"],
-  ] as const) {
+  ] as const;
+  for (let i = 0; i < units.length; i++) {
+    const [value, suffix] = units[i]!;
     if (abs >= value) {
       const scaled = abs / value;
       const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-      return `${sign}${trimZeros(scaled.toFixed(digits))}${suffix}`;
+      const text = scaled.toFixed(digits);
+      // 999,999 rounds to "1000K": that's 1M
+      if (Number(text) >= 1000 && i > 0) return `${sign}1${units[i - 1]![1]}`;
+      return `${sign}${trimZeros(text)}${suffix}`;
     }
   }
-  return `${sign}${trimZeros(abs.toFixed(small))}`;
+  const text = trimZeros(abs.toFixed(small));
+  if (Number(text) >= 1000) return `${sign}1K`;
+  return `${sign}${text}`;
 }
 
 /** Dollars: "$0.42", "$123", "$1.2K", "$4.56M", "<$0.01". */
@@ -52,7 +59,11 @@ export function formatUsd(n: number | null | undefined, opts: SignOptions = {}):
   const sign = n < 0 ? (opts.minus ?? MINUS) : "";
   if (abs === 0) return "$0";
   if (abs < 0.01) return `${sign}<$0.01`;
-  if (abs < 1000) return `${sign}$${abs < 10 ? abs.toFixed(2) : abs.toFixed(abs < 100 ? 1 : 0)}`;
+  // a value that rounds up to the next band is written in that band: 9.996 → "$10.0", 999.6 → "$1K"
+  if (abs < 9.995) return `${sign}$${abs.toFixed(2)}`;
+  if (abs < 99.95) return `${sign}$${abs.toFixed(1)}`;
+  if (abs < 999.5) return `${sign}$${abs.toFixed(0)}`;
+  if (abs < 1000) return `${sign}$1K`;
   return `${sign}$${formatCompact(abs)}`;
 }
 
@@ -68,10 +79,15 @@ export function formatPrice(p: number | null | undefined, prefix = "$", opts: Si
   if (abs >= 1000) return `${sign}${prefix}${formatCompact(abs)}`;
   if (abs >= 1) return `${sign}${prefix}${abs.toFixed(abs >= 100 ? 2 : 3)}`;
   if (abs >= 0.001) return `${sign}${prefix}${trimZeros(abs.toFixed(5))}`;
-  const zeros = Math.floor(-Math.log10(abs) - 1e-12);
-  const digits = String(Math.round(abs * 10 ** (zeros + 1) * 1000))
-    .slice(0, 4)
-    .replace(/0+$/, "");
+  let zeros = Math.floor(-Math.log10(abs) - 1e-12);
+  let scaled = Math.round(abs * 10 ** (zeros + 1) * 1000);
+  // 0.0000099999 rounds to 10000: one zero fewer, not "0.0₅1" (which reads ten times too small)
+  if (scaled >= 10_000) {
+    zeros -= 1;
+    scaled = Math.round(scaled / 10);
+  }
+  if (zeros < 2) return `${sign}${prefix}${trimZeros(abs.toFixed(5))}`;
+  const digits = String(scaled).slice(0, 4).replace(/0+$/, "");
   return `${sign}${prefix}0.0${subscript(zeros)}${digits || "0"}`;
 }
 
@@ -128,7 +144,8 @@ export function formatUnits(value: bigint | string | number, decimals: number, m
 
 /** A decimal string to base units: `parseUnits("1.5", 6)` → 1_500_000n. Throws on more decimals than the token has. */
 export function parseUnits(value: string | number, decimals: number): bigint {
-  const s = String(value).trim();
+  // a number like 1e-7 prints in exponent form; write it out in full first
+  const s = (typeof value === "number" ? (Number.isFinite(value) ? value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 }) : String(value)) : String(value)).trim();
   if (!/^-?\d*(\.\d*)?$/.test(s) || s === "" || s === "." || s === "-") throw new RangeError(`"${s}" isn't a decimal number.`);
   const neg = s.startsWith("-");
   const [whole = "0", frac = ""] = (neg ? s.slice(1) : s).split(".");

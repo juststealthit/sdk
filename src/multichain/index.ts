@@ -1,7 +1,8 @@
 import { ComputeBudgetProgram, PublicKey, SystemInstruction, SystemProgram, Transaction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
-import type { Address, Hash, WalletClient } from "viem";
+import { getAddress, type Address, type Hash, type WalletClient } from "viem";
 
 import { EVM_CHAINS } from "../evm/chains.js";
+import { LIVE_EVM_CHAIN_KEYS, type LiveEvmChainKey } from "../utils/chains.js";
 import { ApiClient, type ApiOptions } from "../shared/api.js";
 import { StealthError, StealthInputError, StealthTransactionMismatchError } from "../shared/errors.js";
 import { type StealthSolana } from "../solana/client.js";
@@ -9,8 +10,9 @@ import type { MixSliceKind, SolanaVenue } from "../solana/constants.js";
 import { base58Encode, decodeTransaction, encodeTransaction, feePayerOf } from "../solana/signer.js";
 import type { PayoutTarget, SolanaSocials, TeamShare } from "../solana/types.js";
 
-export const MULTICHAIN_CHAINS = ["solana", "robinhood", "bnb", "hyperevm", "base", "arc"] as const;
-export type MultichainChain = (typeof MULTICHAIN_CHAINS)[number];
+/** Solana and every live EVM chain. Coming-soon chains join once they're live in the chain registry. */
+export type MultichainChain = "solana" | LiveEvmChainKey;
+export const MULTICHAIN_CHAINS: readonly MultichainChain[] = ["solana", ...LIVE_EVM_CHAIN_KEYS];
 
 export interface McChainOffer {
   chain: MultichainChain;
@@ -216,7 +218,7 @@ export class StealthMultichain {
   }
 
   getOrder(id: string) {
-    return this.api.get<McOrder>(`/multichain/orders/${id}`);
+    return this.api.get<McOrder>(`/multichain/orders/${encodeURIComponent(id)}`, undefined, { cache: false });
   }
 
   /** Follows an order until it ends: `done`, `partial`, `failed` or `expired`. A landed coin stays whatever happens on the other chains. */
@@ -247,11 +249,13 @@ export class StealthMultichain {
 
   /** Which coins launched together. Public. */
   getGroup(id: string) {
-    return this.api.get<McGroup>(`/multichain/groups/${id}`);
+    return this.api.get<McGroup>(`/multichain/groups/${encodeURIComponent(id)}`);
   }
 
   getGroupOfCoin(chain: MultichainChain, token: string) {
-    return this.api.get<McGroup>(`/multichain/coins/${chain}/${token}`);
+    // EVM coins are stored checksummed, so any case finds them
+    const t = chain !== "solana" && /^0x[0-9a-fA-F]{40}$/.test(token) ? getAddress(token.toLowerCase()) : token;
+    return this.api.get<McGroup>(`/multichain/coins/${encodeURIComponent(chain)}/${encodeURIComponent(t)}`);
   }
 
   getGroups() {
@@ -275,7 +279,7 @@ export class StealthMultichain {
     if (payment.amount !== expectedTotal) throw new StealthTransactionMismatchError(`The payment is ${payment.amount}, not the simulated ${expectedTotal}.`);
     const chain = Object.values(EVM_CHAINS).find((c) => c.id === payment.chainId);
     const account = wallet.account;
-    if (!chain || !account) throw new StealthInputError("This needs a wallet account on one of the five EVM chains.");
+    if (!chain || !account) throw new StealthInputError("This needs a wallet account on one of the live EVM chains.");
     return wallet.sendTransaction({ account, chain, to: payment.to as Address, value: BigInt(payment.amount) });
   }
 }
@@ -289,7 +293,7 @@ function assertTransfer(base64: string, from: PublicKey, to: PublicKey, lamports
   const ix = rest[0];
   if (rest.length !== 1 || !ix?.programId.equals(SystemProgram.programId)) throw new StealthTransactionMismatchError("The payment isn't one plain transfer, so it wasn't signed.");
   const t = SystemInstruction.decodeTransfer(ix);
-  if (!t.fromPubkey.equals(from) || !t.toPubkey.equals(to) || t.lamports !== lamports) throw new StealthTransactionMismatchError("The payment's transfer doesn't match the order, so it wasn't signed.");
+  if (!t.fromPubkey.equals(from) || !t.toPubkey.equals(to) || BigInt(t.lamports) !== lamports) throw new StealthTransactionMismatchError("The payment's transfer doesn't match the order, so it wasn't signed.");
 }
 
 export const createStealthMultichain = (opts: ApiOptions & { pollMs?: number } = {}) => new StealthMultichain(opts);

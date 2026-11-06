@@ -16,6 +16,8 @@ Everything here goes straight to the chain through viem, with no API in between.
 | Base | `base` | 8453 | ETH | Uniswap v4 | |
 | Arc | `arc` | 5042 | USDC | Uniswap v4 | Native USDC has 18 decimals |
 
+Ethereum (`ethereum`), Arbitrum One (`arbitrum`) and Avalanche C-Chain (`avalanche`) are coming soon: the contracts are being deployed there, and the SDK carries no address for them until each deploy is checked on chain. X Layer (`xlayer`) is coming soon too. `createStealthEvm` refuses all four with a `StealthUnsupportedError` that says so. Aliases such as `bsc` work for the live chains.
+
 ## Reads
 
 `getConfig()`, `getQuoteConfig(quote)`, `getCoin(token)` (terms, curve position and current fee), `getBalances(token)`, `claimable(token, wallet)`, `getTeam(token)`, `getPoolKey(token)` and `getLaunches({ fromBlock, toBlock })`.

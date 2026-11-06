@@ -7,6 +7,10 @@
 import type { ApiClient, RequestOptions } from "../shared/api.js";
 import { StealthInputError } from "../shared/errors.js";
 import { paginate, type PaginateOptions, type Paginator } from "../shared/paginate.js";
+import { getAddress } from "viem";
+
+import { isEvmAddress } from "../utils/address.js";
+import type { LiveChainKey } from "../utils/chains.js";
 import { flag, orNull, stagesParam, type CursorPage, type MarketToken, type TokenFilters, type TokenListOptionsBase, type TokenStage } from "./common.js";
 import type { FeatureState, PlatformStats, SolIndexerStatus, UsdPrice } from "./sol.js";
 
@@ -18,7 +22,7 @@ export interface AppConfig {
   xUrl: string;
   partnerLine: string;
   tagline: string;
-  /** The official coin's contract address, once it's live. */
+  /** The official coin's contract address, for display. The coin the site acts on is in {@link PlatformApi.tokenConfig}. */
   officialCa: string;
   [field: string]: unknown;
 }
@@ -45,6 +49,7 @@ export interface OfficialToken {
 /** `GET /status`. */
 export interface PlatformStatus {
   network: string;
+  /** `null` when the indexer runs apart from the API; `statusSummary()` still reports it. */
   indexer: SolIndexerStatus | null;
   solUsd: UsdPrice;
   features: Record<string, FeatureState>;
@@ -94,6 +99,7 @@ export interface ChartEvent {
   who: string | null;
   avatar: string | null;
   text: string | null;
+  /** A URL, or for a callout a path on the site such as `/profile/<id>`. */
   link: string | null;
   sol: number | null;
 }
@@ -156,12 +162,45 @@ export interface SocialHandleCheck {
   avatarUrl: string | null;
 }
 
-/** Chains the cross-chain board can filter on. */
-export type MarketChain = "solana" | "robinhood" | "bnb" | "hyperevm" | "base" | "arc";
+/** Chains the cross-chain board can filter on: every live chain. */
+export type MarketChain = LiveChainKey;
 
 export interface MarketTokenListOptions extends TokenListOptionsBase {
   /** Default: every chain that's open. */
   chains?: MarketChain[] | string;
+  /**
+   * `true` leaves out the external trending coins the All list mixes in (rows with `outside`), so you get only coins launched here.
+   * Filtered in the SDK, so a page can hold fewer than 50 rows. Default false.
+   */
+  ownOnly?: boolean;
+}
+
+/** One coin of the cross-chain Trending list: coins launched here and external coins trending on their chains, mixed. */
+export interface MarketTrendingEntry {
+  chain: string;
+  address: string;
+  symbol: string;
+  name: string;
+  logo: string | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  /** Percent. Over 1 hour for an external coin, over 24 hours for a coin launched here. */
+  changePct: number | null;
+  /** USD in the last hour; for a coin launched here, its 24 hour volume / 24. */
+  volume1hUsd: number;
+  /** Launched on Just Stealth It. */
+  onPlatform: boolean;
+  /** An external coin's launchpad, as the data source names it. `null` for ours. */
+  launchpad: string | null;
+  /** $STEALTH. */
+  official: boolean;
+}
+
+export interface MarketTrending {
+  /** Ranked: Solana first, the other chains a few each. At most 60. */
+  coins: MarketTrendingEntry[];
+  /** Whether external coins are switched on at the server. `false`: only coins launched here. */
+  outside: boolean;
 }
 
 const chainsParam = (c: MarketChain[] | string | undefined) => (Array.isArray(c) ? c.join(",") : c);
@@ -170,9 +209,12 @@ const chainsParam = (c: MarketChain[] | string | undefined) => (Array.isArray(c)
 export class MarketApi {
   constructor(private readonly api: ApiClient) {}
 
-  /** One page, 50 coins. Default: every stage, sort `age`. */
-  async list(o: MarketTokenListOptions = {}, opts?: RequestOptions) {
-    return this.api.get<CursorPage<MarketToken>>("/market/tokens", {
+  /**
+   * One page, 50 coins. Default: every stage, sort `age`. The All list (every stage) also carries external trending coins, marked
+   * `outside`; New, Graduating and Graduated never do. Pass `ownOnly` to drop them.
+   */
+  async list(o: MarketTokenListOptions = {}, opts?: RequestOptions): Promise<CursorPage<MarketToken>> {
+    const page = await this.api.get<CursorPage<MarketToken>>("/market/tokens", {
       stages: stagesParam(o.stages),
       sort: o.sort,
       dir: o.dir,
@@ -183,11 +225,28 @@ export class MarketApi {
       socials: flag(o.socials),
       chains: chainsParam(o.chains),
     }, opts);
+    return o.ownOnly ? { ...page, items: page.items.filter((t) => !t.outside) } : page;
+  }
+
+  /** Trending across chains: coins launched here and external coins trending on the picked chains (default: every open chain). */
+  async trending(o: { chains?: MarketChain[] | string } = {}, opts?: RequestOptions) {
+    return this.api.get<MarketTrending>("/market/trending", { chains: chainsParam(o.chains) }, opts);
   }
 
   /** Every coin, page by page. */
   iterate(o: Omit<MarketTokenListOptions, "cursor"> = {}, p: PaginateOptions = {}): Paginator<MarketToken> {
-    return paginate((cursor, signal) => this.list({ ...o, cursor }, { signal }), p);
+    const { ownOnly, ...rest } = o;
+    return paginate(async (cursor, signal) => {
+      let page = await this.list({ ...rest, cursor }, { signal });
+      if (!ownOnly) return page;
+      // a page of external coins only mustn't end the walk: skip ahead (bounded) to one with coins launched here
+      for (let hops = 0; ; hops++) {
+        const items = page.items.filter((t) => !t.outside);
+        if (items.length || !page.nextCursor || hops >= 20 || page.nextCursor === cursor) return { ...page, items };
+        cursor = page.nextCursor;
+        page = await this.list({ ...rest, cursor }, { signal });
+      }
+    }, p);
   }
 
   /** Coins per stage, and per chain. */
@@ -246,7 +305,19 @@ export class PlatformApi {
   /** The image behind an IPFS CID, served through the API (PNG, JPEG, WebP or GIF). A URL, not a fetch. */
   ipfsUrl(cid: string, file?: string): string {
     if (!/^[A-Za-z0-9]{20,100}$/.test(cid)) throw new StealthInputError(`${cid} isn't a CID.`);
-    return this.api.url(`/ipfs/${cid}${file ? `/${encodeURIComponent(file)}` : ""}`);
+    if (file !== undefined && !/^[A-Za-z0-9._-]{1,100}$/.test(file)) throw new StealthInputError("file is 1 to 100 letters, digits, dots, dashes or underscores.");
+    return this.api.url(`/ipfs/${cid}${file ? `/${file}` : ""}`);
+  }
+
+  /** A logo uploaded through the site (`<40 hex>.png|jpg|webp|gif`), served by the API. A URL, not a fetch. */
+  logoUrl(file: string): string {
+    if (!/^[0-9a-f]{40}\.(png|jpg|webp|gif)$/.test(file)) throw new StealthInputError(`${file} isn't an uploaded logo's file name.`);
+    return this.api.url(`/uploads/logo/${file}`);
+  }
+
+  /** Whether the API is up: `{ status: "ok" }`. */
+  async health(opts?: RequestOptions) {
+    return this.api.get<{ status: string }>("/healthz", undefined, { cache: false, ...opts });
   }
 }
 
@@ -259,15 +330,31 @@ export class MultichainGroupsApi {
     return (await this.api.get<{ coins: { groupId: string; chain: string; token: string; home: boolean }[] }>("/multichain/groups", undefined, opts)).coins;
   }
 
-  /** A group by id, or `null`. */
+  /** A group by id (a UUID), or `null`. */
   async get(id: string, opts?: RequestOptions) {
-    return orNull(this.api.get<MultichainGroup>(`/multichain/groups/${id}`, undefined, opts));
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+    return orNull(this.api.get<MultichainGroup>(`/multichain/groups/${id.toLowerCase()}`, undefined, opts));
   }
 
-  /** The group a coin belongs to, or `null` (most coins have none). */
+  /** The group a coin belongs to, or `null` (most coins have none). EVM addresses are matched in any case. */
   async ofCoin(chain: string, token: string, opts?: RequestOptions) {
-    return orNull(this.api.get<MultichainGroup>(`/multichain/coins/${chain}/${token}`, undefined, opts));
+    const t = chain === "solana" ? token : isEvmAddress(token) || /^0x[0-9a-fA-F]{40}$/.test(token) ? getAddress(token.toLowerCase()) : token;
+    return orNull(this.api.get<MultichainGroup>(`/multichain/coins/${encodeURIComponent(chain)}/${encodeURIComponent(t)}`, undefined, opts));
   }
+
+  /** Whether multi-chain launches are on, and on which chains, with the limits. */
+  async config(opts?: RequestOptions) {
+    return this.api.get<MultichainConfigView>("/multichain/config", undefined, opts);
+  }
+}
+
+/** `/multichain/config`: the chains a multi-chain launch can use. `{ enabled: false, chains: [] }` while it's off. */
+export interface MultichainConfigView {
+  enabled: boolean;
+  chains: { chain: string; name: string; native: string; chainId: number; available: boolean; reason: string | null }[];
+  limits?: { maxRequestUsd: number; maxDayUsd: number; perDay: number };
+  bufferBps?: number;
+  retries?: number;
 }
 
 /** Social accounts, for social launches and vaults. */

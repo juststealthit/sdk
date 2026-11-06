@@ -7,7 +7,7 @@
  *
  * @module
  */
-import { StealthApiError } from "../shared/errors.js";
+import { StealthApiError, StealthInputError } from "../shared/errors.js";
 
 /** A coin's stage on the board. */
 export type TokenStage = "new" | "graduating" | "migrated";
@@ -30,11 +30,48 @@ export type TokenSortKey =
   | "lastTrade"
   | "migrated";
 
-/** Candle sizes the launchpad's own charts serve, on Solana and EVM alike. */
-export type CandleInterval = "1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1D";
-export const CANDLE_INTERVALS = ["1s", "1m", "5m", "15m", "1h", "4h", "1D"] as const satisfies readonly CandleInterval[];
+/**
+ * Candle sizes the launchpad's own charts serve, on Solana and EVM alike. One minute is the smallest: the platform dropped the
+ * 1 second interval, and a candle only forms when someone trades.
+ */
+export type CandleInterval = "1m" | "5m" | "15m" | "1h" | "4h" | "1D";
+export const CANDLE_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1D"] as const satisfies readonly CandleInterval[];
+/** What the platform uses when no interval is given. */
+export const DEFAULT_CANDLE_INTERVAL: CandleInterval = "1m";
+/**
+ * Intervals the platform no longer serves. Passing one still works for now: it is read as `1m` (what the API itself answers for
+ * them) with a one-time deprecation warning. This list goes in 1.0.
+ *
+ * @deprecated `1s` candles are gone. Use `1m`.
+ */
+export const DEPRECATED_CANDLE_INTERVALS = ["1s"] as const;
+/** @deprecated `1s` candles are gone. Use `1m`. */
+export type DeprecatedCandleInterval = (typeof DEPRECATED_CANDLE_INTERVALS)[number];
 /** Seconds per candle. */
-export const CANDLE_SECONDS: Record<CandleInterval, number> = { "1s": 1, "1m": 60, "5m": 300, "15m": 900, "1h": 3_600, "4h": 14_400, "1D": 86_400 };
+export const CANDLE_SECONDS: Record<CandleInterval, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3_600, "4h": 14_400, "1D": 86_400 };
+
+let warnedOneSecond = false;
+
+/**
+ * A candle interval the platform serves. `"1s"` (gone) becomes `"1m"` with a one-time warning; `"1d"` is read as `"1D"`; `undefined`
+ * stays `undefined` so the API's default applies. Anything else is a {@link StealthInputError}.
+ */
+export function normalizeCandleInterval(interval: string | undefined | null): CandleInterval | undefined {
+  if (interval === undefined || interval === null || interval === "") return undefined;
+  if ((CANDLE_INTERVALS as readonly string[]).includes(interval)) return interval as CandleInterval;
+  if (interval === "1d") return "1D";
+  if ((DEPRECATED_CANDLE_INTERVALS as readonly string[]).includes(interval)) {
+    if (!warnedOneSecond) {
+      warnedOneSecond = true;
+      const p = (globalThis as { process?: { emitWarning?: (m: string, o: { type: string; code: string }) => void } }).process;
+      const message = `Candle interval "${interval}" is gone on Just Stealth It; reading 1m candles instead. Pass "1m".`;
+      if (p?.emitWarning) p.emitWarning(message, { type: "DeprecationWarning", code: "STEALTH_CANDLE_1S" });
+      else console.warn(message);
+    }
+    return "1m";
+  }
+  throw new StealthInputError(`interval is one of ${CANDLE_INTERVALS.join(", ")}.`);
+}
 
 /** A cursor-paged list. `cursor` / `nextCursor` are opaque strings: pass them back as they came. */
 export interface CursorPage<T> {
@@ -190,13 +227,40 @@ export interface EvmApiToken extends BaseToken {
   [field: string]: unknown;
 }
 
-/** A coin from the cross-chain list: one of the two halves is set. */
+/**
+ * An external coin on the All list: trending on its chain, launched elsewhere. Its chain, its launchpad as the data source names
+ * it (`Pump.fun`, `letsbonk`, `fourmeme`, ...) and its place in its chain's trending list.
+ */
+export interface OutsideTokenInfo {
+  chain: string;
+  launchpad: string | null;
+  trendRank: number | null;
+}
+
+/**
+ * A coin from the cross-chain list: `sol` for a Solana coin launched here, `evm` for an EVM one, `outside` for an external trending
+ * coin (All list only). An outside row has no launchpad fields of its own: `launcher`, `creator`, `feeRecipient` and `poolId` can be
+ * `""`, `taxBps` and `launchBlock` 0, `graduation` all zeros, and `priceEth` 0 off Solana. Use {@link tokenChain} for its chain.
+ */
 export interface MarketToken extends BaseToken {
   sol?: SolTokenExtra;
   evm?: EvmTokenExtra;
+  outside?: OutsideTokenInfo;
   feeMode?: string;
   hidden?: boolean;
   [field: string]: unknown;
+}
+
+/** An external trending coin on the All list (it didn't launch on Just Stealth It). */
+export const isOutsideToken = (t: MarketToken): t is MarketToken & { outside: OutsideTokenInfo } => !!t.outside && !t.sol && !t.evm;
+/** A Solana coin launched here. */
+export const isSolToken = (t: MarketToken): t is MarketToken & { sol: SolTokenExtra } => !!t.sol;
+/** An EVM coin launched here. */
+export const isEvmToken = (t: MarketToken): t is MarketToken & { evm: EvmTokenExtra } => !!t.evm;
+
+/** The chain key of any coin row: `evm.chain`, `outside.chain`, else `solana`. */
+export function tokenChain(t: { evm?: { chain?: string } | null; outside?: { chain?: string } | null; sol?: unknown }): string {
+  return t.evm?.chain || t.outside?.chain || "solana";
 }
 
 /** A trade on a launchpad coin. Amounts are display floats; `ethAmount` and `feeEth` are in the native coin. */

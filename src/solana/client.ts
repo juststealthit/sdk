@@ -14,6 +14,8 @@ import type {
   EncodedTransaction,
   LaunchResultSolana,
   PairCatalog,
+  PairDetail,
+  PairSearch,
   PreparedSolanaLaunch,
   SocialLookup,
   SolanaLaunchInput,
@@ -48,6 +50,11 @@ export interface SolanaTradeOptions {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** A path segment: an address, signature or id, never a path of its own. */
+const seg = (v: string) => {
+  if (typeof v !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(v)) throw new StealthInputError(`${String(v)} isn't an address, signature or id.`);
+  return v;
+};
 const text = (v: string) => v.trim();
 
 /** Mirrors the API's request schema (launch-request.ts), to fail early. The API has the last word. */
@@ -120,11 +127,11 @@ export class StealthSolana {
   }
   /** Any token by name, ticker or address, and whether `venue` can pair with it. */
   searchPairs(q: string, venue: SolanaVenue = "raydium") {
-    return this.api.get<{ [k: string]: unknown }>("/sol/launch/pairs/search", { q, venue });
+    return this.api.get<PairSearch>("/sol/launch/pairs/search", { q, venue });
   }
   /** One pair: its first-buy cap, what its curve raises and what a launch on it pays. */
   getPair(mint: string, opts: { venue?: SolanaVenue; taxTier?: string; globalTaxBps?: number } = {}) {
-    return this.api.get<{ [k: string]: unknown }>(`/sol/launch/pairs/${mint}`, opts);
+    return this.api.get<PairDetail>(`/sol/launch/pairs/${seg(mint)}`, opts);
   }
   /** A wallet launch's address against its chain, the same check the launch makes. */
   checkPayout(chainId: number, address: string) {
@@ -141,42 +148,42 @@ export class StealthSolana {
     return this.api.get<SolanaToken[]>("/sol/tokens/search", { q, limit });
   }
   getToken(mint: string) {
-    return this.api.get<SolanaToken>(`/sol/tokens/${mint}`);
+    return this.api.get<SolanaToken>(`/sol/tokens/${seg(mint)}`);
   }
   /** Read from the pool now, when it can be. */
   getPrice(mint: string) {
-    return this.api.get<{ priceSol: number; priceUsd: number; marketCapUsd: number; solUsd: number; at: number; live: boolean }>(`/sol/tokens/${mint}/price`);
+    return this.api.get<{ priceSol: number; priceUsd: number; marketCapUsd: number; solUsd: number; at: number; live: boolean }>(`/sol/tokens/${seg(mint)}/price`, undefined, { cache: false });
   }
   /** One page of a coin's trades, newest first. For every page, use `data.tokens.iterateTrades(mint)`. */
   getTrades(mint: string, cursor?: string) {
-    return this.api.get<CursorPage<ApiTrade>>(`/sol/tokens/${mint}/trades`, { cursor });
+    return this.api.get<CursorPage<ApiTrade>>(`/sol/tokens/${seg(mint)}/trades`, { cursor });
   }
   getHolders(mint: string) {
-    return this.api.get<SolHolder[]>(`/sol/tokens/${mint}/holders`);
+    return this.api.get<SolHolder[]>(`/sol/tokens/${seg(mint)}/holders`);
   }
   /** A coin's locked launch type and slices. */
   getFeePlan(mint: string) {
-    return this.api.get<TokenFeePlan>(`/sol/tokens/${mint}/fee-plan`);
+    return this.api.get<TokenFeePlan>(`/sol/tokens/${seg(mint)}/fee-plan`);
   }
   getBuybacks(mint: string) {
-    return this.api.get<TokenBuybacks>(`/sol/tokens/${mint}/buybacks`);
+    return this.api.get<TokenBuybacks>(`/sol/tokens/${seg(mint)}/buybacks`);
   }
   getRewards(mint: string) {
-    return this.api.get<TokenRewards>(`/sol/tokens/${mint}/rewards`);
+    return this.api.get<TokenRewards>(`/sol/tokens/${seg(mint)}/rewards`);
   }
   getPortfolio(owner: string) {
-    return this.api.get<Portfolio>(`/sol/portfolio/${owner}`);
+    return this.api.get<Portfolio>(`/sol/portfolio/${seg(owner)}`);
   }
   getBalance(owner: string, mint?: string) {
-    return this.api.get<{ lamports: string; tokenBaseUnits: string | null }>(`/sol/balance/${owner}`, { mint });
+    return this.api.get<{ lamports: string; tokenBaseUnits: string | null }>(`/sol/balance/${seg(owner)}`, { mint });
   }
   /** Fees are claimed by the server's bot. This says when it next runs. */
   getPayoutStatus(mint: string) {
-    return this.api.get<{ enabled: boolean; nextAt: number | null; minLamports: string }>(`/sol/tokens/${mint}/payout`);
+    return this.api.get<{ enabled: boolean; nextAt: number | null; minLamports: string }>(`/sol/tokens/${seg(mint)}/payout`);
   }
   /** Runs a coin's payout now instead of waiting for the bot. Anyone may ask. */
   requestPayout(mint: string) {
-    return this.api.post<{ txs: string[]; retryAt: number | null; paid: boolean }>(`/sol/tokens/${mint}/payout`);
+    return this.api.post<{ txs: string[]; retryAt: number | null; paid: boolean }>(`/sol/tokens/${seg(mint)}/payout`);
   }
 
   // ---- launch --------------------------------------------------------------------------------------------------------
@@ -209,7 +216,8 @@ export class StealthSolana {
   // ---- trades --------------------------------------------------------------------------------------------------------
 
   quote(mint: string, side: "buy" | "sell", amount: bigint, slippageBps = 300) {
-    return this.api.get<SolanaQuote>("/sol/quote", { mint, side, amount: amount.toString(), slippageBps });
+    if (!Number.isInteger(slippageBps) || slippageBps < 10 || slippageBps > 5_000) throw new StealthInputError("slippageBps is 10 to 5,000.");
+    return this.api.get<SolanaQuote>("/sol/quote", { mint, side, amount: amount.toString(), slippageBps }, { cache: false });
   }
 
   /** The API's unsigned swap. */
@@ -326,7 +334,12 @@ export class StealthSolana {
   async confirm(signature: string): Promise<void> {
     const end = Date.now() + this.confirmTimeoutMs;
     while (Date.now() < end) {
-      const s = await this.status(signature).catch(() => null);
+      const s = await this.status(signature).catch((error: unknown) => {
+        // a refusal (a malformed signature, say) won't change by waiting; outages and rate limits might
+        if (error instanceof StealthInputError) throw error;
+        if (error instanceof StealthApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429) throw error;
+        return null;
+      });
       if (s?.status === "confirmed") return;
       if (s?.status === "failed") throw new StealthTransactionError(`Transaction ${signature} failed: ${s.error ?? "on chain"}.`, signature);
       await sleep(this.pollMs);
@@ -336,7 +349,7 @@ export class StealthSolana {
 
   /** `pending`, `confirmed` or `failed`. */
   async status(signature: string): Promise<{ status: "pending" | "confirmed" | "failed"; error: string | null }> {
-    if (!this.connection) return this.api.get(`/sol/tx/${signature}`);
+    if (!this.connection) return this.api.get(`/sol/tx/${seg(signature)}`, undefined, { cache: false });
     const st = (await this.connection.getSignatureStatuses([signature])).value[0];
     if (!st) return { status: "pending", error: null };
     if (st.err) return { status: "failed", error: JSON.stringify(st.err).slice(0, 200) };
@@ -358,7 +371,8 @@ export class StealthSolana {
           signatures = r.signatures;
           bundleId = r.bundleId;
         } catch (error) {
-          if (error instanceof StealthApiError && error.status === 400) throw error;
+          // a malformed bundle, or a server without bundles, won't get better by resending
+          if (error instanceof StealthApiError && (error.status === 400 || (error.status === 503 && error.code === "not_configured"))) throw error;
           lastError = error instanceof Error ? error.message : String(error);
         }
       }
@@ -373,7 +387,7 @@ export class StealthSolana {
         }
         if (s?.status === "failed") throw new StealthTransactionError(`Transaction ${signatures[0]} failed: ${s.error ?? "on chain"}.`, signatures[0] ?? null);
         if (bundleId) {
-          const b = await this.api.get<{ status: string }>(`/sol/bundle/${bundleId}`).catch(() => null);
+          const b = await this.api.get<{ status: string }>(`/sol/bundle/${seg(bundleId)}`, undefined, { cache: false }).catch(() => null);
           if (b?.status === "failed") throw new StealthTransactionError("Jito rejected the launch bundle.", signatures[0] ?? null, { code: "bundle_rejected" });
         }
       }

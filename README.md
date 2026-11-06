@@ -44,7 +44,7 @@ for await (const trade of stealth.sol.tokens.iterateTrades(mint)) {
 stealth.live().trades(mint, ({ trade }) => console.log("live:", trade.side, trade.valueUsd));
 ```
 
-More in [`examples/`](examples): 20 runnable scripts.
+More in [`examples/`](examples): 21 runnable scripts.
 
 ## Modules
 
@@ -60,7 +60,8 @@ Import the part you use. `/api`, `/math`, `/utils` and `/perps` never load Solan
 | `@juststealthit/sdk/multichain` | One payment, a separate coin on each chain, from a server | [docs/multichain.md](docs/multichain.md) |
 | `@juststealthit/sdk/perps` | Read-only perps market data from Hyperliquid, Aster and Jupiter | [docs/perps.md](docs/perps.md) |
 | `@juststealthit/sdk/math` | Fees, the anti-sniper line, curves and staking rewards | [docs/math.md](docs/math.md) |
-| `@juststealthit/sdk/utils` | Formatting, address checks and the chain registry | [docs/utils.md](docs/utils.md) |
+| `@juststealthit/sdk/utils` | Formatting, address checks, the chain registry and site links | [docs/utils.md](docs/utils.md) |
+| `@juststealthit/sdk/keystore` | Node only: the config directory and encrypted keystore the Stealth CLI and MCP server share | [docs/keystore.md](docs/keystore.md) |
 
 Errors, retries, timeouts and caching are covered in [docs/errors-and-http.md](docs/errors-and-http.md).
 
@@ -70,19 +71,19 @@ Errors, retries, timeouts and caching are covered in [docs/errors-and-http.md](d
 
 | Area | Methods |
 | --- | --- |
-| `stealth.platform` | `appConfig`, `tokenConfig`, `officialToken`, `status`, `statusSummary`, `chartEvents`, `ipfsUrl` |
-| `stealth.market` | The launchpad's coins across chains: `list`, `iterate`, `counts`, `search`, `stats` |
-| `stealth.sol` | `config`, `status`, `stats`, `solPrice`, `locks`, `leaderboard`, `leaderboardStatus`, `quote`, `txStatus`, `bundleStatus`, `balance` |
-| `stealth.sol.tokens` | `list`, `iterate`, `counts`, `search`, `get`, `find`, `candles`, `trades`, `iterateTrades`, `holders`, `topTraders`, `risk`, `creator`, `price`, `feePlan`, `buybacks`, `rewards`, `payout`, `marketing`, `marketingStats`, `metadata` |
-| `stealth.sol.market` | Any Solana token, through Jupiter: `coin`, `candles`, `trending`, `launchers`, `launcher`, `quote`, `buildSwap` |
+| `stealth.platform` | `appConfig`, `tokenConfig`, `officialToken`, `status`, `statusSummary`, `chartEvents`, `ipfsUrl`, `logoUrl`, `health` |
+| `stealth.market` | The coins across chains, with external trending coins on the All list: `list`, `iterate`, `trending`, `counts`, `search`, `stats` |
+| `stealth.sol` | `config`, `status`, `stats`, `solPrice`, `locks`, `leaderboard`, `leaderboardStatus`, `quote`, `txStatus`, `bundleStatus`, `balance`, `ctoApplications` |
+| `stealth.sol.tokens` | `list`, `iterate`, `counts`, `search`, `get`, `find`, `candles`, `trades`, `iterateTrades`, `holders`, `topTraders`, `risk`, `creator`, `price`, `feePlan`, `buybacks`, `rewards`, `payout`, `marketing`, `marketingStats`, `metadata`, `ctoEligibility` |
+| `stealth.sol.market` | Any Solana token through Jupiter, and external coins on every chain: `coin`, `candles`, `trending`, `launchers`, `launcher`, `quote`, `buildSwap` |
 | `stealth.sol.wallets` | `pnl`, `trades`, `iterateTrades`, `rewards`, `analytics`, `activity`, `analysis`, `portfolio` |
-| `stealth.sol.burn` | The $STEALTH buy back and burn: `overview`, `events`, `iterateEvents`, `coins`, `coin`, `next` |
-| `stealth.sol.marketing` | The marketing ladder: `tiers`, `overview`, `summary`, `leaderboard` |
+| `stealth.sol.burn` | The $STEALTH buy back and burn: `overview`, `events`, `iterateEvents`, `coins`, `coin`, `next`, `bot` |
+| `stealth.sol.marketing` | The marketing ladder: `tiers`, `overview`, `summary`, `leaderboard`, `analytics` |
 | `stealth.evm` | `config`, `wallet`, `positions`, and `chain(key)` for one chain's reads |
 | `stealth.evm.chain("base")` | `nativePrice`, `listTokens`, `iterateTokens`, `countTokens`, `searchTokens`, `getToken`, `findToken`, `getCandles`, `getTrades`, `iterateTrades`, `getHolders`, `getTopTraders`, `getRisk`, `quote`, `getRewards`, `getPot`, `getBuybacks`, `getPayoutBot`, `getMarketing`, `getMarketingStats`, `marketing*` |
 | `stealth.feed` | `list`, `iterate`, `fees`, `feesOverview`, `profile`, `profileCoins`, `followers`, `following` |
-| `stealth.staking` | `overview`, `pool`, `position`, `estimate`, and the raw `prepareStake`, `prepareUnstake`, `submit` |
-| `stealth.multichain` | Launch groups: `list`, `get`, `ofCoin` |
+| `stealth.staking` | `status`, `overview`, `pool`, `position`, `estimate`, and the raw `prepareStake`, `prepareUnstake`, `submit`. Staking is built and opens soon: `status()` says `not_open` until then |
+| `stealth.multichain` | Launch groups and settings: `list`, `get`, `ofCoin`, `config` |
 | `stealth.social` | `people`, `lookup`, `profile`, `checkHandle` |
 | `stealth.live()` | The live stream, shared by the client |
 
@@ -100,6 +101,7 @@ live.heads(({ block, lag }) => console.log("slot", block, "indexer lag", lag));
 live.onReconnect(() => refetch()); // messages sent while it was down are gone
 
 for await (const msg of live.iterate("tokens")) console.log(msg.type); // or as an async iterator
+live.trades(null, ({ trade }) => console.log("whale", trade.valueUsd), { side: "buy", minValueUsd: 1_000 }); // typed filters
 
 off();
 live.close();
@@ -159,7 +161,9 @@ await stealth.claim(token);
 | Base | `base` | 8453 | ETH | Uniswap v4 |
 | Arc | `arc` | 5042 | USDC (18 decimals) | Uniswap v4 |
 
-Avalanche, Arbitrum and X Layer are announced but have nothing deployed. The chain registry in `/utils` marks them `coming_soon`, and the SDK refuses them.
+Ethereum, Arbitrum One and Avalanche C-Chain are coming soon: the contracts are being deployed there now, and their addresses join the SDK once each deploy is checked on chain. X Layer is coming soon too. The chain registry in `/utils` marks all four `coming_soon` (the first three `deploying`), and the SDK refuses them with a `StealthUnsupportedError`.
+
+Charts: one minute is the smallest candle. The `1s` interval is gone; passing it still works and reads `1m`, with a one-time deprecation warning.
 
 ## Multi-chain
 
@@ -210,8 +214,9 @@ Everything the SDK throws on purpose is a `StealthError` with a stable `code`.
 | `StealthParseError` | `invalid_response` | The answer wasn't JSON |
 | `StealthBrowserWriteError` | `browser_write_blocked` | See [Browsers](#browsers) |
 | `StealthWebSocketError` | `websocket_error` | The stream closed or couldn't connect |
+| `StealthUnsupportedError` | `unsupported` | A coming-soon chain, or something this environment lacks |
 
-`isStealthError(e, "not_found")` narrows by code. EVM reverts come through viem with the contract's error name, such as `StaleConfig` or `MaxBuyExceeded`.
+`isStealthError(e, "not_found")` narrows by code, and recognises errors from another installed copy of the SDK too. EVM reverts come through viem with the contract's error name, such as `StaleConfig` or `MaxBuyExceeded`.
 
 ## Reliability
 

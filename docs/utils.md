@@ -41,11 +41,30 @@ These check the format only, not whether anything lives at the address.
 
 ## Chain registry
 
-`CHAINS` lists every chain, each with `key`, `name`, `family`, `status`, `chainId`, `native`, `nativeDecimals`, `dex` and `explorer`.
+`CHAINS` lists every chain, each with `key`, `name`, `family`, `status`, `deploying`, `chainId`, `native`, `nativeDecimals`, `dex` and `explorer`.
 
-| Key | Status |
+| Key | Name | Status |
+| --- | --- | --- |
+| `solana`, `robinhood`, `bnb`, `hyperevm`, `base`, `arc` | Solana, Robinhood Chain, BNB Chain, HyperEVM, Base, Arc | `live` |
+| `ethereum`, `arbitrum`, `avalanche` | Ethereum, Arbitrum One, Avalanche C-Chain | `coming_soon`, `deploying: true`: the contracts are being deployed, and have no addresses until each deploy is checked on chain |
+| `xlayer` | X Layer | `coming_soon`: announced, nothing deployed |
+
+A coming-soon chain has no contract address anywhere in the SDK, and everything that would act on one (`StealthEvm`, `stealth.evm.chain()`, the market's `{ chain }`) throws a `StealthUnsupportedError` (code `unsupported`) that says it's coming soon.
+
+| Read it with | Gives |
 | --- | --- |
-| `solana`, `robinhood`, `bnb`, `hyperevm`, `base`, `arc` | `live` |
-| `avalanche`, `arbitrum`, `xlayer` | `coming_soon`: announced, nothing deployed |
+| `listChains()`, `liveChains()`, `comingSoonChains()`, `deployingChains()` | Lists of `ChainInfo`, live ones first |
+| `LIVE_CHAIN_KEYS`, `LIVE_EVM_CHAIN_KEYS`, `COMING_SOON_CHAIN_KEYS` | Key arrays, for an enum of chains a tool accepts |
+| `getChain(key)`, `chainKeyOf(key)` | A chain by key, in any case, or by an alias (`sol`, `bsc`, `eth`, `arb`, `avax`) |
+| `chainById(id)` | A chain by EVM chain id |
+| `isLiveChain(key)`, `isLiveEvmChain(key)`, `isComingSoonChain(key)` | Exact-key checks |
+| `requireLiveChain(key, family?)` | The chain, or the error a coming-soon or unknown chain gets |
+| `explorerUrl(chain, "tx" \| "address" \| "token", value)` | An explorer link |
 
-`listChains()`, `liveChains()`, `comingSoonChains()`, `getChain(key)`, `chainById(id)`, `isLiveChain(key)` and `explorerUrl(chain, "tx" | "address" | "token", value)` read it. Whether a live EVM chain is switched on right now is the API's call: see `stealth.evm.config()`.
+Whether a live EVM chain is switched on right now is the API's call: see `stealth.evm.config()`.
+
+Turning a chain on takes two edits that the type checker holds together: its `status` in `src/utils/chains.ts`, and its addresses in `src/evm/deployments.ts`, the one place contract addresses live. Every other list of chains in the SDK follows from those.
+
+## Site links
+
+`coinPageUrl({ address, chain, onPlatform }, siteUrl?)` is the site's page for a coin: `/token/<address>` for a coin launched here (with `?chain=` off Solana), `/trending/<address>` for an external one (`onPlatform: false`). `SITE_URL` is the site.

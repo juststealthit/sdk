@@ -144,18 +144,19 @@ describe("chain registry", () => {
   });
 
   it("marks announced chains as coming soon, after the live ones", () => {
-    expect(comingSoonChains().map((c) => c.key)).toEqual(["avalanche", "arbitrum", "xlayer"]);
+    expect(comingSoonChains().map((c) => c.key)).toEqual(["ethereum", "arbitrum", "avalanche", "xlayer"]);
     expect(liveChains().map((c) => c.key)).toEqual(["solana", "robinhood", "bnb", "hyperevm", "base", "arc"]);
     expect(listChains().at(-1)!.status).toBe("coming_soon");
     expect(isLiveChain("arbitrum")).toBe(false);
     expect(isLiveChain("base")).toBe(true);
-    expect(Object.keys(CHAINS)).toHaveLength(9);
+    expect(Object.keys(CHAINS)).toHaveLength(10);
   });
 
   it("builds explorer links", () => {
     expect(explorerUrl("base", "tx", "0xabc")).toBe("https://basescan.org/tx/0xabc");
     expect(explorerUrl("solana", "address", "W")).toBe("https://solscan.io/account/W");
     expect(explorerUrl("solana", "token", "M")).toBe("https://solscan.io/token/M");
-    expect(explorerUrl("xlayer", "tx", "0x1")).toBeNull();
+    expect(explorerUrl("xlayer", "tx", "0x1")).toBe("https://www.oklink.com/xlayer/tx/0x1");
+    expect(explorerUrl("nope", "tx", "0x1")).toBeNull();
   });
 });

@@ -6,6 +6,7 @@
 import type { ApiClient, RequestOptions } from "../shared/api.js";
 import { StealthInputError } from "../shared/errors.js";
 import { paginate, type PaginateOptions, type Paginator } from "../shared/paginate.js";
+import { orNull } from "./common.js";
 
 export interface ProfileCard {
   id: number;
@@ -26,7 +27,8 @@ export interface FeedPost {
   mine: boolean;
 }
 
-export type FeedEventKind = "launch" | "graduated" | "marketing_done" | "burn" | "dev_buy" | "social_claim" | "fee_claim";
+/** What an event is about. The Feed sends `launch`, `graduated`, `burn`, `marketing_done` and `social_claim` today; other kinds may come. */
+export type FeedEventKind = "launch" | "graduated" | "marketing_done" | "burn" | "dev_buy" | "social_claim" | "fee_claim" | (string & {});
 
 export interface FeedEventView {
   template: string;
@@ -114,7 +116,7 @@ export interface FeedListOptions {
   limit?: number;
   /** The previous page's `next`. */
   before?: string;
-  /** Only this profile's items. */
+  /** Only this profile's posts (events are left out). */
   author?: number;
 }
 
@@ -146,8 +148,9 @@ export class FeedApi {
   }
 
   /** Creator fees, dev buys and burns at a glance. */
+  /** `null` on a server that doesn't publish it. */
   async feesOverview(opts?: RequestOptions) {
-    return this.api.get<FeesOverview>("/feed/fees/overview", undefined, opts);
+    return orNull(this.api.get<FeesOverview>("/feed/fees/overview", undefined, opts));
   }
 
   async profile(id: number, opts?: RequestOptions) {
